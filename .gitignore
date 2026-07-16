@@ -21,10 +21,10 @@ One Piece/
 *.weights
 
 # --- Generated outputs / test artifacts ---
-GPT Pipline/crops_output/
-GPT Pipline/willhoward_crops/
-GPT Pipline/willhoward_ocr_crops/
-GPT Pipline/willhoward_ocr_output.txt
+crops_output/
+willhoward_crops/
+willhoward_ocr_crops/
+willhoward_ocr_output.txt
 
 # --- Personal card photos at project root ---
 *.jpeg
