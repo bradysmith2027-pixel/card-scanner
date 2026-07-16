@@ -1,0 +1,47 @@
+# --- Secrets (never commit) ---
+.env
+.env.*
+*.pem
+*.key
+
+# --- Python ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Training data (private — part of the business moat, and heavy) ---
+Topps/
+Panini/
+One Piece/
+
+# --- Model weights (paid to train — keep private) ---
+*.pt
+*.onnx
+*.weights
+
+# --- Generated outputs / test artifacts ---
+GPT Pipline/crops_output/
+GPT Pipline/willhoward_crops/
+GPT Pipline/willhoward_ocr_crops/
+GPT Pipline/willhoward_ocr_output.txt
+
+# --- Personal card photos at project root ---
+*.jpeg
+*.jpg
+Screenshot*.png
+\[C\]*.png
+
+# --- Obsidian vault internals & notes (not code) ---
+.obsidian/
+.obsidian_old_separate_vault/
+.claude/
+.claudian/
+\[C\]*.md
+*.base
+CLAUDE.md
+COMMANDS.md
+
+# --- OS junk ---
+.DS_Store
+Thumbs.db
