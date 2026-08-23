@@ -1,0 +1,16 @@
+# Step 5 FastAPI backend deps. Install into the existing venv:
+#   C:\Users\brady\.venvs\card-scanner\Scripts\python.exe -m pip install -r backend/requirements.txt
+#
+# The card-scanning deps (inference, opencv-python, openai, roboflow) live in
+# the project-root requirements.txt — the backend imports card_vision.py /
+# ocr_card.py from there, so install BOTH files into the same venv.
+
+fastapi
+uvicorn[standard]
+supabase
+pyjwt
+python-multipart
+python-dotenv
+slowapi
+pytest
+httpx

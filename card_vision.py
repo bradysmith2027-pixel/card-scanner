@@ -9,7 +9,7 @@ refactoring crop_card_regions.py to share it, so the already-working crop
 script stays untouched.
 """
 
-DEFAULT_MODEL_ID = "bradys-workspace-wqkgm/dreamboat-slabs-1-yolov8n-t1"
+DEFAULT_MODEL_ID = "bradys-workspace-wqkgm/dreamboat-slabs-3-yolov8n-t1"
 
 # One-piece cards only ever get these two fields per the project spec.
 ONE_PIECE_ALLOWED_CLASSES = {"player_name", "card_number"}

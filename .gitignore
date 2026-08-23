@@ -1,8 +1,18 @@
 # --- Secrets (never commit) ---
 .env
 .env.*
+!.env.example
+!backend/.env.example
 *.pem
 *.key
+
+# --- Live-DB check scripts: contain standing test-user credentials ---
+# These authenticate against the real Supabase project with a hardcoded
+# password. The repo is public, so publishing them would hand out working
+# logins. Excluded until the creds are parameterized (env vars) or the
+# scripts are deliberately declared local-only.
+backend/tests/live_*.py
+backend/tests/security_probe.py
 
 # --- Python ---
 venv/
