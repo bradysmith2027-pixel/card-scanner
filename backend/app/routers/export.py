@@ -9,6 +9,7 @@ card), blank otherwise.
 
 import csv
 import io
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Optional
 
@@ -16,6 +17,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.auth import AuthedUser, current_user
 from app.supabase_client import user_client
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["export"])
 
@@ -40,6 +43,8 @@ def export_csv(user: AuthedUser = Depends(current_user)) -> Response:
     try:
         resp = client.table("cards").select("*").order("created_at", desc=True).execute()
     except Exception:
+        # Real cause server-side; generic message to the client.
+        log.exception("GET /export/csv failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to export cards.",

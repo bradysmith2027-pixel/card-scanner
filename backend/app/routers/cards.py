@@ -134,7 +134,11 @@ def list_cards(
     try:
         resp = query.execute()
     except Exception:
-        # Generic message to the client; no internal/DB detail leaked.
+        # Log the real cause server-side, return a generic message to the
+        # client (no internal/DB detail leaked). Without the log this branch is
+        # undebuggable in production — the same gap create_card had until
+        # 2026-08-18, which is what made the 23514 constraint bug a mystery.
+        log.exception("GET /cards failed (status_filter=%r)", status_filter)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Failed to fetch cards.",
