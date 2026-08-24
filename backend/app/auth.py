@@ -21,6 +21,7 @@ SIGNING KEYS (2026-07-21):
   we don't need an HS256 fallback path.
 """
 
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -30,6 +31,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 # auto_error=False so we can return a clean 401 instead of FastAPI's default.
 _bearer = HTTPBearer(auto_error=False)
@@ -85,8 +88,13 @@ def current_user(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token."
         )
     except Exception:
-        # JWKS fetch/parse failures, malformed token headers, etc. Generic 401
-        # to the client; no internal detail leaked.
+        # JWKS fetch/parse failures, missing SUPABASE_URL, malformed token
+        # headers, etc. The client gets a generic 401 (no internal detail
+        # leaked), but the real cause is logged server-side — otherwise this
+        # branch is undebuggable in production, which is exactly what happened
+        # on 2026-08-24 when an unset SUPABASE_URL surfaced only as
+        # "Could not verify token." Same lesson as the create_card fix (8/18).
+        logger.exception("Token verification failed")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not verify token.",
