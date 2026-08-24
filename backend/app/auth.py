@@ -99,8 +99,16 @@ def current_user(
             detail="Token missing subject.",
         )
 
-    # Access allowlist (env ALLOWED_EMAILS). Empty = open/multi-tenant; when set,
-    # only listed emails may use the API — even with an otherwise-valid token.
+    # Access allowlist (env ALLOWED_EMAILS) — FAIL-CLOSED as of 2026-08-24.
+    #
+    # A valid token is NOT sufficient. Supabase signup is public and Google SSO
+    # issues usable tokens with no email confirmation, so "authenticated" means
+    # "any stranger with a Google account." The allowlist is the real gate.
+    #
+    #   ALLOWED_EMAILS set      -> only those emails pass
+    #   unset + ALLOW_OPEN_ACCESS=true -> open, deliberately
+    #   unset + no opt-in       -> DENY EVERYONE (a forgotten env var must never
+    #                              silently open the API)
     settings = get_settings()
     if settings.allowed_emails:
         email = payload.get("email")
@@ -109,5 +117,13 @@ def current_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access restricted to the owner.",
             )
+    elif not settings.allow_open_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Access control is not configured. Set ALLOWED_EMAILS, or set "
+                "ALLOW_OPEN_ACCESS=true to intentionally allow any signed-in user."
+            ),
+        )
 
     return AuthedUser(id=user_id, token=token)

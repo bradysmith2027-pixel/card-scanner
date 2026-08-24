@@ -34,7 +34,7 @@ loose `.pt` file yourself.
 Open a terminal in this folder and run:
 
 ```
-pip install -r requirements.txt
+pip install -r requirements-cv.txt
 ```
 
 This installs two things: `inference` (Roboflow's free self-hosted model
@@ -173,12 +173,12 @@ method.
 
 ## One-time setup
 
-The `openai` package is already in `requirements.txt`, so if you ran
-`pip install -r requirements.txt` fresh it's covered. If you set up your
+The `openai` package is already in `requirements-cv.txt`, so if you ran
+`pip install -r requirements-cv.txt` fresh it's covered. If you set up your
 venv before this update, just run it again (with the venv active):
 
 ```
-pip install -r requirements.txt
+pip install -r requirements-cv.txt
 ```
 
 ## Running it

@@ -1,0 +1,17 @@
+# Card-scanning (computer vision) dependencies -- LOCAL / CLI ONLY.
+#
+# Renamed from requirements.txt on 2026-08-24. It was previously the default
+# filename at the repo root, so a Railway build that lost its 'backend' Root
+# Directory setting auto-installed THIS file and failed on 'inference'
+# (which also drags in torch, ~2-4 GB). The deployed API must never install
+# these: app/scan_service.py imports card_vision/ocr_card lazily, so the
+# backend runs fine without them and /scan simply returns 503.
+#
+# Deployed backend deps live in backend/requirements.txt.
+# Install these only for local scanning:
+#   C:\Users\brady\.venvs\card-scanner\Scripts\python.exe -m pip install -r requirements-cv.txt
+
+inference
+opencv-python
+openai
+roboflow
