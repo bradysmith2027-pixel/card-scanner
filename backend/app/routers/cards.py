@@ -110,6 +110,88 @@ def create_card(
     return resp.data[0]
 
 
+class CardUpdate(BaseModel):
+    """Partial update payload.
+
+    Every field is optional; only the keys actually present in the request body
+    are written (see `exclude_unset` in `update_card`). Sending `{}` is rejected
+    rather than silently doing nothing.
+
+    Deliberately NOT updatable: `id`, `user_id`, `created_at`, `updated_at`.
+    Ownership must never be reassignable from the client — RLS's WITH CHECK
+    would reject it anyway, but the field is omitted so the attempt can't even
+    be expressed.
+    """
+
+    player: Optional[str] = Field(default=None, min_length=1)
+    year: Optional[str] = Field(default=None, min_length=1)
+    set_name: Optional[str] = Field(default=None, min_length=1)
+    category: Optional[str] = Field(default=None, min_length=1)
+    card_number: Optional[str] = None
+    card_type: Optional[str] = None
+    purchase_price: Optional[Money] = None
+    purchase_date: Optional[date] = None
+    sale_price: Optional[Money] = None
+    sale_date: Optional[date] = None
+    status: Optional[str] = None
+    ebay_comp_url: Optional[str] = None
+    # Storage PATH inside the private `card-images` bucket, not a public URL —
+    # e.g. "{user_id}/{card_id}/front.jpg". The bucket is private, so the client
+    # mints a short-lived signed URL at render time. Storing a signed URL here
+    # would be wrong: it expires, and the row would rot.
+    image_url: Optional[str] = None
+    notes: Optional[str] = None
+    acquisition_source: Optional[str] = None
+
+
+@router.patch("/{card_id}", response_model=Card)
+def update_card(
+    card_id: str,
+    payload: CardUpdate,
+    user: AuthedUser = Depends(current_user),
+) -> dict:
+    """
+    Partially update one of the current user's cards.
+
+    RLS is the isolation boundary: the UPDATE simply cannot match a row owned by
+    someone else, so a wrong/guessed `card_id` returns 404 rather than touching
+    another user's data. `updated_at` is maintained by the DB trigger.
+    """
+    changes = payload.model_dump(mode="json", exclude_unset=True)
+    if not changes:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No fields to update.",
+        )
+
+    client = user_client(user.token)
+    try:
+        resp = client.table("cards").update(changes).eq("id", card_id).execute()
+    except Exception:
+        # Same reasoning as create_card: log the real cause (CHECK violation,
+        # RLS rejection, bad column) server-side, keep the client message
+        # generic so no DB detail leaks.
+        log.exception(
+            "Card update failed (card_id=%r). Changed keys: %s",
+            card_id,
+            sorted(changes),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to update card.",
+        )
+
+    if not resp.data:
+        # Either no such card, or it belongs to someone else. Both are 404 on
+        # purpose — distinguishing them would confirm the existence of another
+        # user's row.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Card not found.",
+        )
+    return resp.data[0]
+
+
 @router.get("", response_model=list[Card])
 def list_cards(
     user: AuthedUser = Depends(current_user),
