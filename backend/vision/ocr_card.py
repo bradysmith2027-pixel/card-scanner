@@ -56,7 +56,12 @@ import os
 import re
 import sys
 
-import card_vision
+try:
+    # Normal case: imported as part of the `vision` package (the API does this).
+    from . import card_vision
+except ImportError:
+    # Run directly as a CLI script, where there is no package context.
+    import card_vision
 
 # One Piece cards only fill card_type, card_number, player_name -- no
 # year/set_name, per the project's Output Shape spec.

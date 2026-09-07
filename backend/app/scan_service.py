@@ -16,18 +16,11 @@ first scan pays the model-download cost.
 """
 
 import json
-import pathlib
-import sys
 from functools import lru_cache
 
 import numpy as np
 
 from app.config import get_settings
-
-# card_vision.py / ocr_card.py live at the project root, one level above backend/.
-_ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
 
 _CONFIDENCE = 0.25
 
@@ -48,18 +41,18 @@ class ScanUnavailable(Exception):
 @lru_cache(maxsize=1)
 def _vision():
     """
-    Import card_vision / ocr_card on first use rather than at module import.
+    Import the vision modules on first use rather than at module import.
 
-    card_vision pulls in `inference` (torch + opencv, ~2-4 GB). Importing it
-    at module level meant main.py -> routers/scan.py -> scan_service.py could
-    not boot at all without those deps installed. Deferring it lets one
-    codebase run both ways: with the CV deps present /scan works normally;
-    without them the rest of the API boots fine and only /scan returns 503.
-    Mirrors the deferral already used for cv2 (_decode) and OpenAI (_openai).
+    They now live in backend/vision/ (moved 2026-09-06). Previously they sat at
+    the project root, OUTSIDE Railway's `backend` root directory, so the
+    container never had them at all — that, not the missing CV dependencies,
+    is what made /scan return 503 in production.
+
+    Still imported lazily: cv2 and openai are only needed for scanning, and
+    deferring keeps the rest of the API bootable if either is absent.
     """
     try:
-        import card_vision
-        import ocr_card
+        from vision import card_vision, ocr_card
     except ImportError as e:  # pragma: no cover - depends on deploy target
         raise ScanUnavailable(
             "Card scanning isn't available on this deployment - "
@@ -71,10 +64,34 @@ def _vision():
 
 @lru_cache(maxsize=1)
 def _model():
+    """
+    Load the detection model, hosted or local, per ROBOFLOW_INFERENCE_MODE.
+
+    "auto" (default) uses the local `inference` package when it is installed
+    and falls back to Roboflow's hosted API otherwise. That is deliberate:
+    Brady's laptop has the weights and runs them for free, while Railway has no
+    torch and calls the hosted endpoint — one codebase, no per-environment
+    config, and bulk local scanning never burns hosted credits.
+    """
     card_vision, _ = _vision()
     settings = get_settings()
     settings.require("roboflow_api_key")
-    return card_vision.load_model(card_vision.DEFAULT_MODEL_ID, settings.roboflow_api_key)
+
+    mode = settings.roboflow_inference_mode
+    if mode == "auto":
+        try:
+            import inference  # noqa: F401
+            mode = "local"
+        except ImportError:
+            mode = "hosted"
+
+    if mode == "local":
+        return card_vision.load_model(
+            card_vision.DEFAULT_MODEL_ID, settings.roboflow_api_key
+        )
+    return card_vision.load_hosted_model(
+        card_vision.DEFAULT_MODEL_ID, settings.roboflow_api_key
+    )
 
 
 @lru_cache(maxsize=1)
@@ -98,7 +115,15 @@ def _decode(image_bytes: bytes):
 
 def _crops(model, image, card_type):
     card_vision, _ = _vision()
-    boxes = card_vision.detect(model, image, confidence=_CONFIDENCE, card_type=card_type)
+    try:
+        boxes = card_vision.detect(
+            model, image, confidence=_CONFIDENCE, card_type=card_type
+        )
+    except card_vision.HostedInferenceUnavailable as e:
+        # Out of Roboflow credits. Surface as "unavailable here" (503), not a
+        # transient gateway error (502) — retrying will never succeed, and the
+        # honest message is that scanning has to happen on the laptop.
+        raise ScanUnavailable(str(e)) from e
     return card_vision.best_crop_per_class(image, boxes)
 
 

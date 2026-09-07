@@ -7,20 +7,12 @@ are compatible (one is a fuller version of the other), or genuinely conflict
 correctness surface behind "is this the same card read two ways, or a real
 disagreement?"
 
-ocr_card lives at the project root (one level above backend/), same as how
-scan_service imports it.
+ocr_card lives in backend/vision/, same as how scan_service imports it.
 """
-
-import pathlib
-import sys
 
 import pytest
 
-_ROOT = pathlib.Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-import ocr_card  # noqa: E402
+from vision import ocr_card
 
 pytestmark = pytest.mark.unit
 

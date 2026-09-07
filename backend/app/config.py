@@ -36,6 +36,18 @@ class Settings:
         self.roboflow_api_key = os.environ.get("ROBOFLOW_API_KEY", "")
         self.openai_api_key = os.environ.get("OPENAI_API_KEY", "")
 
+        # How detection runs: "auto" (default) | "local" | "hosted".
+        #   local  — the `inference` package, weights in-process. Needs torch
+        #            (~2-4 GB), so it can only ever work on the laptop. Free.
+        #   hosted — Roboflow's REST endpoint, same weights, no torch. Costs
+        #            credits (free tier is 15/mo shared across the account).
+        #   auto   — local if `inference` imports, else hosted.
+        # Anything unrecognized falls back to "auto" rather than failing a boot.
+        mode = os.environ.get("ROBOFLOW_INFERENCE_MODE", "auto").strip().lower()
+        self.roboflow_inference_mode = (
+            mode if mode in ("auto", "local", "hosted") else "auto"
+        )
+
         raw_origins = os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost:5173")
         self.cors_allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
 

@@ -1,9 +1,14 @@
 # Step 5 FastAPI backend deps. Install into the existing venv:
 #   C:\Users\brady\.venvs\card-scanner\Scripts\python.exe -m pip install -r backend/requirements.txt
 #
-# The card-scanning deps (inference, opencv-python, openai, roboflow) live in
-# the project-root requirements.txt — the backend imports card_vision.py /
-# ocr_card.py from there, so install BOTH files into the same venv.
+# These now include everything /scan needs EXCEPT torch. Detection runs against
+# Roboflow's hosted API (backend/vision/card_vision.py -> load_hosted_model),
+# so the deployed image stays small and /scan works in production.
+#
+# The heavy local-inference path (`inference`, which pulls torch ~2-4 GB) lives
+# in the project-root requirements-cv.txt and is OPTIONAL — install it only on
+# the laptop, where scan_service auto-detects it and uses the local weights so
+# bulk scanning costs no hosted credits.
 
 fastapi
 uvicorn[standard]
@@ -15,3 +20,9 @@ slowapi
 pytest
 httpx
 numpy
+
+# Scanning: image decode/encode/crop + GPT-4o OCR. `-headless` is the
+# server-safe OpenCV build — plain opencv-python links GUI libraries
+# (libGL etc.) that don't exist in a slim container and fail at import.
+opencv-python-headless
+openai
