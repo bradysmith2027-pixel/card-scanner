@@ -13,6 +13,22 @@ array and re-encoding crops as JPEG also strips EXIF (incl. GPS) for free.
 
 The Roboflow model and OpenAI client are cached (loaded once), so only the
 first scan pays the model-download cost.
+
+TWO MODES (added 2026-09-15) — see SCAN_VISION_MODE in config.py:
+  "fullcard" (DEFAULT) — the whole card photo goes to GPT-4o, which locates the
+      fields itself. No Roboflow, no weights, no torch, no credits, no AGPL.
+      Needs only OPENAI_API_KEY, and is the only mode that can run in
+      production today.
+  "detector" — the original YOLO path, kept and fully working.
+
+Why the default flipped: every route back to self-hosted weights was blocked —
+hosted inference out of credits (402), raw weight export behind a paid Core
+plan, and a YOLOv8n retrain inherits Ultralytics' AGPL-3.0, rejected
+2026-07-20 as "risky for a commercial network app".
+
+⚠️ The detector was NOT deleted. It is validated at mAP 87.4% and cost real
+annotation time; on 2026-08-31 Claude proposed removing it and Brady correctly
+pushed back. One env var switches straight back.
 """
 
 import json
@@ -157,28 +173,47 @@ def run_scan(
         else:
             raise ScanError("card_type for sports must be 'topps', 'panini', or omitted.")
 
-    model = _model()
     client = _openai()
+    vision_mode = get_settings().scan_vision_mode
 
-    front_crops = _crops(model, front_img, card_type)
+    back_img = (
+        _decode(back_bytes) if capture_mode == "sports" and back_bytes else None
+    )
 
-    if card_type is None:
-        # Sports with no override — guess topps vs panini from the set_logo crop.
-        card_type = ocr_card.guess_card_type_from_logo(client, front_crops.get("set_logo"))
+    if vision_mode == "fullcard":
+        # No detector at all: the whole card goes to GPT-4o, which locates the
+        # fields itself. Nothing here touches Roboflow, so this path needs no
+        # ROBOFLOW_API_KEY, no weights, and no credits — it is the only mode
+        # that can currently run in production.
         if card_type is None:
-            raise ScanError(
-                "Couldn't determine card type from the logo — resend with "
-                "card_type set to 'topps' or 'panini'."
-            )
-        # Re-crop the front now that we know the type (no-op for topps/panini,
-        # which don't filter classes, but keeps behavior explicit).
+            card_type = ocr_card.guess_card_type_from_card(client, front_img)
+            if card_type is None:
+                raise ScanError(
+                    "Couldn't determine card type from the photo — resend with "
+                    "card_type set to 'topps' or 'panini'."
+                )
+        messages = ocr_card.build_fullcard_messages(front_img, back_img, card_type)
+    else:
+        model = _model()
         front_crops = _crops(model, front_img, card_type)
 
-    back_crops = None
-    if capture_mode == "sports" and back_bytes:
-        back_crops = _crops(model, _decode(back_bytes), card_type)
+        if card_type is None:
+            # Sports with no override — guess topps vs panini from the set_logo crop.
+            card_type = ocr_card.guess_card_type_from_logo(
+                client, front_crops.get("set_logo")
+            )
+            if card_type is None:
+                raise ScanError(
+                    "Couldn't determine card type from the logo — resend with "
+                    "card_type set to 'topps' or 'panini'."
+                )
+            # Re-crop the front now that we know the type (no-op for topps/panini,
+            # which don't filter classes, but keeps behavior explicit).
+            front_crops = _crops(model, front_img, card_type)
 
-    messages = ocr_card.build_messages(front_crops, back_crops, card_type)
+        back_crops = _crops(model, back_img, card_type) if back_img is not None else None
+        messages = ocr_card.build_messages(front_crops, back_crops, card_type)
+
     schema = ocr_card.build_schema(card_type)
 
     response = client.chat.completions.create(
@@ -189,7 +224,14 @@ def run_scan(
     raw = json.loads(response.choices[0].message.content)
 
     fields = ocr_card.FIELDS_BY_CARD_TYPE[card_type]
-    result: dict = {"card_type": card_type, "card_type_source": source}
+    result: dict = {
+        "card_type": card_type,
+        "card_type_source": source,
+        # Which pipeline produced this. Worth returning: the two modes fail
+        # differently, and a reading is not interpretable without knowing
+        # which one made it.
+        "vision_mode": vision_mode,
+    }
     needs_review: list[str] = []
     conflicts: dict = {}
     for field in fields:

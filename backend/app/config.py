@@ -48,6 +48,31 @@ class Settings:
             mode if mode in ("auto", "local", "hosted") else "auto"
         )
 
+        # How /scan reads a card: "fullcard" (default) | "detector".
+        #
+        #   fullcard — send the WHOLE card photo to GPT-4o and let it locate the
+        #              fields itself. No Roboflow, no weights, no torch, no
+        #              credits, no ONNX, and no AGPL question. Needs only
+        #              OPENAI_API_KEY, so it is the only mode that can actually
+        #              run on Railway today.
+        #   detector — the original YOLO path: Roboflow detects field boxes,
+        #              crops them, and GPT-4o reads the crops.
+        #
+        # Default flipped to "fullcard" on 2026-09-15. Every route back to
+        # self-hosted weights was blocked: hosted inference is out of credits
+        # (402), raw weight export needs a paid Core plan, and retraining
+        # YOLOv8n lands on Ultralytics' AGPL-3.0 — rejected 2026-07-20 as
+        # "risky for a commercial network app".
+        #
+        # ⚠️ The detector path is KEPT, not deleted. It is validated at mAP
+        # 87.4% and cost real annotation time; on 2026-08-31 Claude proposed
+        # removing YOLO and Brady correctly pushed back. Set
+        # SCAN_VISION_MODE=detector to switch straight back.
+        scan_mode = os.environ.get("SCAN_VISION_MODE", "fullcard").strip().lower()
+        self.scan_vision_mode = (
+            scan_mode if scan_mode in ("fullcard", "detector") else "fullcard"
+        )
+
         raw_origins = os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost:5173")
         self.cors_allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
 

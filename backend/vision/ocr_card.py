@@ -334,6 +334,161 @@ def build_messages(front_crops, back_crops, card_type):
     ]
 
 
+# --- FULL-CARD MODE (added 2026-09-15) ------------------------------------
+#
+# Reads the WHOLE card instead of detector-cropped fields. This exists because
+# every route back to self-hosted weights was blocked: hosted inference is out
+# of credits (402), raw weight export requires a paid Core plan, and retraining
+# YOLOv8n lands on Ultralytics' AGPL-3.0 -- rejected 2026-07-20 as "risky for a
+# commercial network app".
+#
+# It works because the detector never did the reading. Its only job was cropping
+# so OCR was easier; GPT-4o always did the identification, and everything
+# downstream (build_schema, merge_field, needs_review) operates on text, not on
+# boxes. Measured 2026-09-15 over 17 dataset cards: 45/50 fields populated,
+# 2/2 exact matches against the only known ground truth (OP01-024, OP03-102),
+# ~$0.005/card. Every miss was a front/back DISAGREEMENT that merge_field
+# correctly refused to resolve -- never a wrong value written silently -- and
+# those conflicts are downstream of detection, so the detector path hits them
+# identically.
+
+# Phone photos are far larger than the model needs, but shrinking too
+# aggressively is exactly what would destroy small print like a "44/99" serial.
+# 1600px matches the cap the hosted-detection path already used.
+FULLCARD_MAX_EDGE_PIXELS = 1600
+
+FULLCARD_SYSTEM_PROMPT = """You are reading printed text off photographs of a complete \
+trading card. Each image is labeled with which side of the card it shows (front or back). \
+You are seeing the ENTIRE card, so you must locate each requested field yourself.
+
+Rules:
+- Read exactly what is printed. Do not guess, autocomplete, or infer a value that is not \
+clearly legible on the card.
+- If a field is not present, is illegible, or is obscured by glare, return null for it \
+rather than guessing. A null is a correct answer when the text cannot be read; an invented \
+value is not.
+- For "set_name", output ONLY the brand and set name (e.g. "Panini Prizm", "Topps Chrome", \
+"Bowman Chrome"). Do NOT include the year, the sport (e.g. "Football", "Baseball"), the card \
+number, or the player. If the card reads "2025 Panini - Prizm Football", extract just \
+"Panini Prizm".
+- For "card_number", output the number as printed, removing ONLY a leading label word or \
+symbol such as "No.", "#", or "Card" (e.g. "No. 388" -> "388", "#44/99" -> "44/99"). Do NOT \
+strip a set or series code that is part of the number -- a One Piece number printed as \
+"OP01-024" must stay complete as "OP01-024" (never "024"), and a serial like "44/99" keeps \
+both parts. When unsure whether something is a label or part of the number, keep it.
+- A serial number (e.g. "9/25", stamped to show a limited print run) is NOT the card \
+number. The card number is usually printed on the BACK near the copyright text. If a side \
+shows only a serial and no card number, return null for card_number on that side rather \
+than substituting the serial.
+- The player name is the person featured on the card. On a One Piece card it is the \
+character's name.
+- Do not identify rarity, parallel type, or visual variation -- only the literal printed text.
+- If no image labeled "back" is provided, return null for every field under "back". Do not \
+invent values.
+"""
+
+FULLCARD_TYPE_GUESS_SYSTEM_PROMPT = """You are looking at a photograph of a complete \
+trading card. Identify the manufacturer from its branding.
+
+Rules:
+- Only answer "topps" or "panini" if you can clearly recognize the brand.
+- If the card is too blurry, cropped, or ambiguous to tell confidently, return null -- \
+do not guess.
+"""
+
+
+def encode_full_image(image_bgr, max_edge=FULLCARD_MAX_EDGE_PIXELS):
+    """Base64-encode a whole-card photo, downscaled to a sane upload size."""
+    import cv2
+
+    h, w = image_bgr.shape[:2]
+    scale = min(1.0, max_edge / max(h, w))
+    if scale < 1.0:
+        image_bgr = cv2.resize(
+            image_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA
+        )
+    return encode_image(image_bgr)
+
+
+def build_fullcard_messages(front_image, back_image, card_type):
+    """Same contract as build_messages, but from whole-card photos.
+
+    Returns the identical message shape, so build_schema / merge_field and the
+    rest of the pipeline are untouched.
+    """
+    fields = FIELDS_BY_CARD_TYPE[card_type]
+    intro = (
+        f"This is a {card_type} trading card. Extract these fields: "
+        f"{', '.join(fields)}.\n"
+        "You are shown the complete card; locate each field yourself."
+    )
+    content = [{"type": "text", "text": intro}]
+    for side, image in (("front", front_image), ("back", back_image)):
+        if image is None:
+            continue
+        content.append({"type": "text", "text": f"{side.upper()} of the card:"})
+        content.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{encode_full_image(image)}",
+                # "high" forces full tiling instead of one downsampled thumbnail.
+                # Without it, small print (card numbers, serials) is not
+                # resolvable and reads would fail for the wrong reason.
+                "detail": "high",
+            },
+        })
+    return [
+        {"role": "system", "content": FULLCARD_SYSTEM_PROMPT},
+        {"role": "user", "content": content},
+    ]
+
+
+def guess_card_type_from_card(client, front_image):
+    """Topps vs. Panini from the whole front, with no detector.
+
+    Replaces guess_card_type_from_logo in full-card mode, which needed a
+    set_logo crop that only a detector could produce. Same contract: returns
+    "topps", "panini", or None, and None means "ask the user" rather than
+    "pick one" -- the 2026-07-08 Panini-reads-as-Topps bug came from defaulting
+    blind, and that lesson holds regardless of how the image is framed.
+    """
+    if front_image is None:
+        return None
+
+    schema = {
+        "name": "card_type_guess",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"card_type": {"type": ["string", "null"]}},
+            "required": ["card_type"],
+            "additionalProperties": False,
+        },
+    }
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": FULLCARD_TYPE_GUESS_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Which brand made this card?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{encode_full_image(front_image)}"
+                        },
+                    },
+                ],
+            },
+        ],
+        response_format={"type": "json_schema", "json_schema": schema},
+    )
+    raw = json.loads(response.choices[0].message.content)
+    guess = raw.get("card_type")
+    return guess if guess in ("topps", "panini") else None
+
+
 def build_schema(card_type):
     fields = FIELDS_BY_CARD_TYPE[card_type]
 
