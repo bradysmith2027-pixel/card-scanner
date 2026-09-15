@@ -81,8 +81,10 @@ def health() -> dict:
 
 
 # --- Routers (mounted as they're built) ------------------------------------
-from app.routers import cards, export, scan  # noqa: E402
+from app.routers import cards, export, lots, scan, trades  # noqa: E402
 
 app.include_router(cards.router)
 app.include_router(scan.router)
 app.include_router(export.router)
+app.include_router(trades.router)
+app.include_router(lots.router)
