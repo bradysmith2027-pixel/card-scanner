@@ -6,9 +6,12 @@ current_user dependency before any Supabase call. DB-backed behavior (RLS
 isolation, real rows) needs an integration test with a real JWT — added later.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+pytestmark = pytest.mark.unit
 
 client = TestClient(app)
 

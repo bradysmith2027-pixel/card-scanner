@@ -14,6 +14,8 @@ from app.trade_basis import (
     allocate_trade_basis,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def test_one_for_one_carries_basis_exactly():
     r = allocate_trade_basis(["100.00"], [ReceivedCard("B", Decimal("250"))])

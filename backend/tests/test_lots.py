@@ -13,6 +13,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 from tests.test_trades import MultiDB, _Client
 
+pytestmark = pytest.mark.unit
+
 client = TestClient(app)
 
 

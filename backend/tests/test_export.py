@@ -1,8 +1,11 @@
 """test_export.py — offline auth-gate tests for GET /export/csv."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+pytestmark = pytest.mark.unit
 
 client = TestClient(app)
 

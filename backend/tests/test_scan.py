@@ -5,9 +5,12 @@ The auth gate and validation short-circuit before any Roboflow/OpenAI work, so
 these run without network or spend. Full pipeline is covered by the live check.
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+
+pytestmark = pytest.mark.unit
 
 client = TestClient(app)
 

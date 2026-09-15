@@ -16,6 +16,8 @@ import pytest
 from app import profit
 from app.routers.cards import CardClose, CardCreate, CardUpdate
 
+pytestmark = pytest.mark.unit
+
 
 # --------------------------------------------------------------------------
 # The headline case from the build spec

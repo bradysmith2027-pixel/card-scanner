@@ -15,6 +15,8 @@ from app.lot_basis import (
     lot_all_in_cost,
 )
 
+pytestmark = pytest.mark.unit
+
 
 def lot(total="200.00", **kw):
     base = {"total_cost": total}
