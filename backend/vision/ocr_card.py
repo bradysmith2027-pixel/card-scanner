@@ -435,9 +435,28 @@ into it.
 side rather than substituting the serial.
 - The player name is the person featured on the card. On a One Piece card it is the \
 character's name.
-- Do not identify rarity, parallel type, or visual variation -- only the literal printed text.
+- Do not identify rarity or grade.
 - If no image labeled "back" is provided, return null for every field under "back". Do not \
 invent values.
+
+"parallel" is the card's parallel / variation / finish -- the version of the card, not the \
+card itself. Examples: "Silver Prizm", "Refractor", "Gold", "Camo", "Disco", "Wave", \
+"X-Fractor", "Holo". You are seeing the whole card, so you may use its appearance.
+- Give the parallel name only. Do NOT repeat the player, year, set or card number into it.
+- If this is an ordinary BASE card with no special finish, return null. Base is not a \
+parallel, and "Base" is not an acceptable answer.
+- If you cannot name the parallel, return null. Do not describe the card instead -- \
+"shiny", "silver-ish", "some kind of refractor" are all wrong answers; null is the right one.
+
+"parallel_confidence" says HOW you know, and it must be exactly "high", "low", or null:
+- "high" -- ONLY when the parallel's name is actually PRINTED somewhere on the card (many \
+Topps Chrome backs print "REFRACTOR"; some parallels are named on the front). You read it.
+- "low" -- when you inferred it from appearance: foil colour, pattern, border, texture, \
+shine. Anything you judged rather than read is "low", however obvious it looks.
+- null -- when "parallel" is null.
+Be honest here. A "low" answer is useful and will be checked by a person. A "high" answer \
+on something you did not actually read is the one outcome that causes real harm, because it \
+will not be checked.
 
 "category" is the ONE field that is not printed text. It is the sport or game the card \
 belongs to, judged from the whole card -- the uniform, the equipment, the playing surface, \
@@ -586,10 +605,27 @@ def build_schema(card_type):
                 "front": side_schema(),
                 "back": side_schema(),
                 "category": {"type": ["string", "null"]},
+                # `parallel` + `parallel_confidence` (2026-09-16). Also whole-
+                # card, for the same reason as category.
+                #
+                # The confidence is NOT a subjective score — the prompt defines
+                # it objectively: "high" means the parallel's name is PRINTED on
+                # the card, "low" means it was inferred from foil, colour or
+                # pattern. That is a question a model can answer reliably,
+                # unlike "how sure are you?", and it maps straight onto whether
+                # the value can be trusted without a human looking.
+                "parallel": {"type": ["string", "null"]},
+                "parallel_confidence": {"type": ["string", "null"]},
             },
             # strict mode requires every property to be listed here, including
-            # the nullable one.
-            "required": ["front", "back", "category"],
+            # the nullable ones.
+            "required": [
+                "front",
+                "back",
+                "category",
+                "parallel",
+                "parallel_confidence",
+            ],
             "additionalProperties": False,
         },
     }

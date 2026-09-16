@@ -143,6 +143,24 @@ def _crops(model, image, card_type):
     return card_vision.best_crop_per_class(image, boxes)
 
 
+# Answers that mean "this card has no parallel". The prompt forbids them, but a
+# model that ignores the instruction must not be allowed to write "Base" into
+# card_type — that would turn an empty field into a positive claim, and a base
+# card wrongly labelled is the same class of error as a parallel wrongly named.
+_NOT_A_PARALLEL = {
+    "base",
+    "base card",
+    "none",
+    "n/a",
+    "na",
+    "null",
+    "unknown",
+    "standard",
+    "regular",
+    "no parallel",
+}
+
+
 def run_scan(
     front_bytes: bytes,
     back_bytes: bytes | None,
@@ -259,6 +277,49 @@ def run_scan(
     result["category"] = (
         category if category in ocr_card.ALLOWED_CATEGORIES else None
     )
+
+    # --- parallel: allowed to guess, required to admit it (2026-09-16) ------
+    #
+    # This REVERSES a standing decision ("variation/rarity picked manually,
+    # never auto-classified"). Brady's call, and the reasoning is the same one
+    # that unlocked category: that rule was written for the DETECTOR, which
+    # sent five cropped text regions. You cannot judge a foil pattern from a
+    # crop of a card number. Full-card mode can see the finish.
+    #
+    # The risk is real and asymmetric, which is why confidence is mandatory:
+    # base vs. Silver Prizm can be a 10x price difference, and a wrong parallel
+    # written confidently into a $50k inventory is worse than a blank field,
+    # because nothing downstream ever questions it.
+    #
+    # So `parallel_confidence` is objective, not a vibe: "high" means the name
+    # was PRINTED and read; "low" means it was inferred from appearance.
+    # Anything not "high" is flagged for review and renders amber.
+    raw_parallel = raw.get("parallel")
+    parallel = raw_parallel.strip() if isinstance(raw_parallel, str) else None
+    # Guard against the model describing the card instead of naming the
+    # parallel, and against a "Base"/"None" answer the prompt forbids.
+    if parallel and (len(parallel) > 60 or parallel.lower() in _NOT_A_PARALLEL):
+        parallel = None
+    result["parallel"] = parallel or None
+
+    raw_conf = raw.get("parallel_confidence")
+    confidence = raw_conf.strip().lower() if isinstance(raw_conf, str) else None
+    confidence = confidence if confidence in ("high", "low") else None
+    result["parallel_confidence"] = confidence if result["parallel"] else None
+
+    # Flag unless it was actually READ off the card. Note the default when
+    # confidence is missing or unparseable is to FLAG, not to trust — an
+    # unreadable confidence is exactly the case we cannot vouch for.
+    if result["parallel"] and result["parallel_confidence"] != "high":
+        needs_review.append("parallel")
+
+    # Cross-check against the serial, which is free evidence we already have.
+    # A stamped print run means the card is SOME parallel by definition — a
+    # base card is not numbered. So "numbered but no parallel identified"
+    # means the single most value-relevant attribute is missing, and the user
+    # should be told rather than left with a blank box.
+    if result.get("serial") and not result["parallel"]:
+        needs_review.append("parallel")
 
     result["needs_review"] = needs_review
     result["conflicts"] = conflicts

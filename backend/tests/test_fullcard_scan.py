@@ -191,7 +191,95 @@ def test_serial_and_card_number_no_longer_collide():
     )])
     assert result["card_number"] == "127"
     assert result["serial"] == "9/25"
+    # Neither field conflicts any more — that was the whole point.
+    assert "card_number" not in result["needs_review"]
+    assert "serial" not in result["needs_review"]
+    # `parallel` IS flagged, and correctly so: a stamped print run means the
+    # card is some parallel by definition, and this payload names none.
+    # See test_numbered_card_with_no_parallel_is_flagged.
+    assert result["needs_review"] == ["parallel"]
+
+
+# --- parallel inference (2026-09-16) ---------------------------------------
+#
+# This reverses the standing "never auto-classify variation" rule, so the tests
+# are weighted toward what must NOT happen. Base vs. Silver Prizm can be a 10x
+# price difference; a confidently wrong parallel on a $50k inventory is worse
+# than a blank field, because nothing downstream questions it.
+def _p(parallel=None, confidence=None, **extra):
+    return {**_ocr_payload(**extra), "parallel": parallel,
+            "parallel_confidence": confidence}
+
+
+def test_printed_parallel_is_trusted_and_not_flagged():
+    """"high" means the name was PRINTED on the card and read, not judged."""
+    result, _ = _run([_p("Refractor", "high")])
+    assert result["parallel"] == "Refractor"
+    assert result["parallel_confidence"] == "high"
+    assert "parallel" not in result["needs_review"]
+
+
+def test_inferred_parallel_is_kept_but_flagged():
+    """Brady: "We can change this but flag it if not as confident." A visually
+    judged parallel is still useful — it just has to be checked."""
+    result, _ = _run([_p("Silver Prizm", "low")])
+    assert result["parallel"] == "Silver Prizm"
+    assert "parallel" in result["needs_review"]
+
+
+@pytest.mark.parametrize("confidence", [None, "", "medium", "HIGHISH", 3, "maybe"])
+def test_unparseable_confidence_defaults_to_FLAGGED(confidence):
+    """🔴 The default must be to flag, never to trust. An unreadable confidence
+    is precisely the case that cannot be vouched for, so failing open here
+    would let the least reliable answers through unmarked."""
+    result, _ = _run([_p("Gold", confidence)])
+    assert result["parallel"] == "Gold"
+    assert result["parallel_confidence"] is None
+    assert "parallel" in result["needs_review"]
+
+
+@pytest.mark.parametrize(
+    "value", ["Base", "base card", "NONE", "n/a", "unknown", "Regular", "  "]
+)
+def test_base_card_answers_are_rejected(value):
+    """A base card must leave card_type EMPTY. Writing "Base" turns an absent
+    value into a positive claim, which is the same class of error as naming the
+    wrong parallel."""
+    result, _ = _run([_p(value, "high")])
+    assert result["parallel"] is None
+
+
+def test_card_description_is_rejected_rather_than_stored():
+    """The prompt forbids describing the card instead of naming the parallel.
+    Length is the backstop for when it does it anyway."""
+    result, _ = _run([_p("some kind of shiny silver refractor with a wave pattern "
+                         "across the whole front of the card", "low")])
+    assert result["parallel"] is None
+
+
+def test_confidence_is_nulled_when_there_is_no_parallel():
+    """A confidence with nothing to be confident about is noise."""
+    result, _ = _run([_p(None, "high")])
+    assert result["parallel"] is None
+    assert result["parallel_confidence"] is None
+    # ...and with no serial either, nothing to flag.
     assert result["needs_review"] == []
+
+
+def test_numbered_card_with_no_parallel_is_flagged():
+    """A stamped print run means the card IS some parallel — base cards are not
+    numbered. So "numbered but unidentified" means the most value-relevant
+    attribute is missing, and silence would hide that."""
+    result, _ = _run([_p(None, None, front={"serial": "9/25"})])
+    assert result["serial"] == "9/25"
+    assert result["parallel"] is None
+    assert "parallel" in result["needs_review"]
+
+
+def test_numbered_card_WITH_a_printed_parallel_is_not_flagged():
+    """The cross-check must not fire when the parallel is actually known."""
+    result, _ = _run([_p("Gold", "high", front={"serial": "9/25"})])
+    assert "parallel" not in result["needs_review"]
 
 
 # --- category inference (2026-09-16) ---------------------------------------
