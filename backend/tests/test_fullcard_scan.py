@@ -194,6 +194,49 @@ def test_serial_and_card_number_no_longer_collide():
     assert result["needs_review"] == []
 
 
+# --- category inference (2026-09-16) ---------------------------------------
+def test_category_is_top_level_not_per_side():
+    """The sport is a judgement about the whole card, not printed text with a
+    front and a back reading. Per-side would invent a disagreement that cannot
+    exist and send it to manual review for nothing."""
+    schema = ocr_card.build_schema("topps")["schema"]
+    assert "category" in schema["properties"]
+    assert "category" in schema["required"]  # strict mode demands it
+    for side in ("front", "back"):
+        assert "category" not in schema["properties"][side]["properties"]
+
+
+@pytest.mark.parametrize("value", ["basketball", "football", "one piece", "other"])
+def test_recognised_category_is_passed_through(value):
+    result, _ = _run([{**_ocr_payload(), "category": value}])
+    assert result["category"] == value
+
+
+@pytest.mark.parametrize("value", ["Basketball", "  FOOTBALL  ", "one piece"])
+def test_category_is_normalised_before_matching(value):
+    """Case and stray whitespace must not turn a good answer into a null."""
+    result, _ = _run([{**_ocr_payload(), "category": value}])
+    assert result["category"] == value.strip().lower()
+
+
+@pytest.mark.parametrize(
+    "value", ["hoops", "American Football", "", "  ", None, 7, "basketball card"]
+)
+def test_unrecognised_category_becomes_none(value):
+    """🔴 `cards.category` has NO CHECK constraint (confirmed 2026-08-18), so a
+    bad value would NOT fail the insert — it would be stored silently and
+    fragment every per-category report. Validate here or nowhere."""
+    result, _ = _run([{**_ocr_payload(), "category": value}])
+    assert result["category"] is None
+
+
+def test_missing_category_key_does_not_crash():
+    """Older payloads, or a model that omits the key, must degrade to null
+    rather than raising — the rest of the scan is still perfectly usable."""
+    result, _ = _run([_ocr_payload()])
+    assert result["category"] is None
+
+
 def test_unnumbered_card_reports_no_serial():
     """Most cards aren't numbered. Null must stay null — not an empty string,
     which migration 010's CHECK rejects outright."""

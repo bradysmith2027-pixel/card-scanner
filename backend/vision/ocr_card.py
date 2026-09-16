@@ -65,11 +65,51 @@ except ImportError:
 
 # One Piece cards only fill card_type, card_number, player_name -- no
 # year/set_name, per the project's Output Shape spec.
+#
+# "serial" added 2026-09-16 with migration 010. Until then the prompt correctly
+# identified a serial and then returned null for it, because there was nowhere
+# to put it -- the read was right and the value was thrown away.
+#
+# ⚠️ NOT added for one_piece. OP cards are not serial-numbered in the Topps /
+# Panini sense, the Output Shape spec fixes their fields at two, and the
+# 2026-09-15 evaluation measured One Piece at 10/10. Adding a field that is
+# almost always null to the one card type that currently reads perfectly is
+# pure downside. Revisit only if OP serials actually show up in inventory.
+#
+# ⚠️ DETECTOR MODE: there is no "serial" class in the Roboflow annotations, so
+# build_messages simply finds no crop for it and sends none -- the schema still
+# requires the key, and the model returns null. That is the honest outcome:
+# the detector path never could read serials (confirmed 2026-09-15), and this
+# makes that a visible null rather than a silent omission.
 FIELDS_BY_CARD_TYPE = {
-    "topps": ["year", "set_name", "card_number", "player_name"],
-    "panini": ["year", "set_name", "card_number", "player_name"],
+    "topps": ["year", "set_name", "card_number", "serial", "player_name"],
+    "panini": ["year", "set_name", "card_number", "serial", "player_name"],
     "one_piece": ["card_number", "player_name"],
 }
+
+# The sport/game, inferred from the image rather than read off it (2026-09-16).
+#
+# WHY IT CAN BE DONE NOW: `category` is NOT NULL in the DB and the scanner
+# could never detect it, so the confirm screen has always forced a manual pick
+# and blocked submit until the user made one. That was correct while the
+# DETECTOR drove scanning — it only ever sent five cropped text regions, and
+# you cannot tell basketball from hockey from a crop of a card number.
+# Full-card mode (9/15) sends the whole card, so the sport is simply visible.
+#
+# ⚠️ These MUST stay identical to CATEGORIES in the frontend's cardOptions.ts.
+# `category` has no CHECK constraint (confirmed 8/18), so a bad value will NOT
+# fail the insert — it will be silently stored and quietly fragment every
+# per-category report. Unconstrained is more dangerous here, not less.
+ALLOWED_CATEGORIES = [
+    "basketball",
+    "football",
+    "baseball",
+    "hockey",
+    "soccer",
+    "one piece",
+    "pokemon",
+    "other",
+]
 
 # Extra crops sent alongside the fields above purely as VISUAL CONTEXT --
 # not text to transcribe, and not their own output field. set_logo is the
@@ -111,6 +151,10 @@ Do NOT strip a set or series code that is itself part of the number -- e.g. a On
 number printed as "OP01-024" must stay complete as "OP01-024" (never "024"), and a serial \
 like "44/99" keeps both parts. When unsure whether something is a label or part of the \
 number, keep it.
+- "serial" is the stamped limited print run (a fraction like "9/25", meaning this is card 9 \
+of only 25 made). It is NOT the card number and the two must never be swapped. There is no \
+cropped image for it in this mode, so unless a serial is plainly visible inside another \
+crop, return null for "serial". Most cards are not numbered and null is the correct answer.
 - Do not attempt to identify the card's rarity, parallel type, or visual variation -- only \
 extract the literal printed text for the fields listed.
 - If no images are labeled "back", return null for every field under "back" -- do not \
@@ -376,15 +420,35 @@ symbol such as "No.", "#", or "Card" (e.g. "No. 388" -> "388", "#44/99" -> "44/9
 strip a set or series code that is part of the number -- a One Piece number printed as \
 "OP01-024" must stay complete as "OP01-024" (never "024"), and a serial like "44/99" keeps \
 both parts. When unsure whether something is a label or part of the number, keep it.
-- A serial number (e.g. "9/25", stamped to show a limited print run) is NOT the card \
-number. The card number is usually printed on the BACK near the copyright text. If a side \
-shows only a serial and no card number, return null for card_number on that side rather \
-than substituting the serial.
+- "card_number" and "serial" are DIFFERENT FIELDS and must never be swapped. The card \
+number is the card's position in the set checklist, usually printed on the BACK near the \
+copyright text. The serial is a stamped limited print run, usually on the FRONT, written \
+as a fraction like "9/25" (this card is number 9 of only 25 made).
+- For "serial", output it exactly as printed, keeping both parts of the fraction and any \
+prefix that is stamped with it (e.g. "9/25", "1/1", "FOTL 12/99"). Remove only a leading \
+"#". If the run size is legible but the card's own number is not, output what you can read \
+(e.g. "/25") rather than guessing the missing half.
+- Most cards are NOT numbered. If there is no stamped print run anywhere on the side you \
+are looking at, return null for "serial". Do not invent one, and never copy the card number \
+into it.
+- If a side shows only a serial and no card number, return null for card_number on that \
+side rather than substituting the serial.
 - The player name is the person featured on the card. On a One Piece card it is the \
 character's name.
 - Do not identify rarity, parallel type, or visual variation -- only the literal printed text.
 - If no image labeled "back" is provided, return null for every field under "back". Do not \
 invent values.
+
+"category" is the ONE field that is not printed text. It is the sport or game the card \
+belongs to, judged from the whole card -- the uniform, the equipment, the playing surface, \
+the league marks, the artwork. Answer with EXACTLY one of these lowercase strings and \
+nothing else:
+basketball, football, baseball, hockey, soccer, one piece, pokemon, other.
+- "football" means American football. A soccer card is "soccer".
+- Use "other" only for a real trading card of some other sport or game.
+- If you cannot tell confidently, return null. Null is a correct answer and the user will \
+pick from a list; a wrong sport is stored without complaint and quietly corrupts every \
+per-category report.
 """
 
 FULLCARD_TYPE_GUESS_SYSTEM_PROMPT = """You are looking at a photograph of a complete \
@@ -505,8 +569,27 @@ def build_schema(card_type):
         "strict": True,
         "schema": {
             "type": "object",
-            "properties": {"front": side_schema(), "back": side_schema()},
-            "required": ["front", "back"],
+            # `category` sits at the TOP LEVEL, deliberately not inside
+            # front/back (added 2026-09-16).
+            #
+            # Every other field is printed text, so it has a front reading and a
+            # back reading and `merge_field` reconciles them. The sport is not
+            # printed text — it is a judgement about the whole object, and one
+            # physical card has exactly one sport. Putting it per-side would
+            # invent a disagreement that cannot exist and send it to manual
+            # review for no reason.
+            #
+            # It rides along in the SAME call, so it costs nothing extra. A
+            # second request (the way brand detection works in
+            # guess_card_type_from_card) would double the per-scan price.
+            "properties": {
+                "front": side_schema(),
+                "back": side_schema(),
+                "category": {"type": ["string", "null"]},
+            },
+            # strict mode requires every property to be listed here, including
+            # the nullable one.
+            "required": ["front", "back", "category"],
             "additionalProperties": False,
         },
     }

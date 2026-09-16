@@ -243,6 +243,23 @@ def run_scan(
             needs_review.append(field)
             conflicts[field] = conflict
 
+    # --- category: a SUGGESTION, never an authority (2026-09-16) ------------
+    #
+    # Validated against the allowed list rather than trusted, exactly like the
+    # topps/panini brand guess. `cards.category` has NO CHECK constraint
+    # (confirmed 8/18), so an unexpected value would NOT fail the insert — it
+    # would be stored silently and fragment every per-category report. An
+    # unconstrained column needs MORE validation here, not less.
+    #
+    # Anything unrecognised becomes None, which the confirm screen renders as
+    # an unselected dropdown that still blocks submit. The user is never worse
+    # off than before this existed; at worst they pick from the list as always.
+    raw_category = raw.get("category")
+    category = raw_category.strip().lower() if isinstance(raw_category, str) else None
+    result["category"] = (
+        category if category in ocr_card.ALLOWED_CATEGORIES else None
+    )
+
     result["needs_review"] = needs_review
     result["conflicts"] = conflicts
     return result
