@@ -36,7 +36,10 @@ router = APIRouter(tags=["export"])
 # all-in (with the components beside it so a number is never unexplained), what
 # it sold for, what came off the top, and what was actually made.
 _COLUMNS = [
-    "player", "year", "set_name", "card_number", "card_type", "category",
+    # `serial` sits next to card_number on purpose: they are the two numbers on
+    # a card and they are constantly confused. Side by side in the export, a
+    # value in the wrong column is obvious at a glance.
+    "player", "year", "set_name", "card_number", "serial", "card_type", "category",
     "position_type", "lane",
     "purchase_price", "shipping_in", "purchase_tax", "other_costs",
     "grading_cost", "all_in_cost",
@@ -92,6 +95,7 @@ def export_csv(user: AuthedUser = Depends(current_user)) -> Response:
             _csv_value(c.get("year")),
             _csv_value(c.get("set_name")),
             _csv_value(c.get("card_number")),
+            _csv_value(c.get("serial")),
             _csv_value(c.get("card_type")),
             _csv_value(c.get("category")),
             _csv_value(c.get("position_type")),

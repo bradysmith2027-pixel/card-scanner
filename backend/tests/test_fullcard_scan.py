@@ -62,7 +62,9 @@ def _img(h=40, w=30):
 
 
 def _ocr_payload(front=None, back=None):
-    blank = {"year": None, "set_name": None, "card_number": None, "player_name": None}
+    # Mirrors FIELDS_BY_CARD_TYPE["topps"] — `serial` added by migration 010.
+    blank = {"year": None, "set_name": None, "card_number": None,
+             "serial": None, "player_name": None}
     return {"front": {**blank, **(front or {})}, "back": {**blank, **(back or {})}}
 
 
@@ -149,7 +151,55 @@ def test_prompt_tells_the_model_a_serial_is_not_a_card_number():
     prompt = ocr_card.FULLCARD_SYSTEM_PROMPT.lower()
     assert "serial" in prompt
     assert "9/25" in ocr_card.FULLCARD_SYSTEM_PROMPT
-    assert "is not the card number" in prompt
+    assert "different fields" in prompt and "never be swapped" in prompt
+
+
+# --- migration 010: the serial now has somewhere to go ---------------------
+def test_serial_is_its_own_field_for_sports_cards():
+    """Before migration 010 the prompt could TELL a serial from a card number
+    but had nowhere to report it, so a correct read was discarded.
+    """
+    for card_type in ("topps", "panini"):
+        fields = ocr_card.FIELDS_BY_CARD_TYPE[card_type]
+        assert "serial" in fields
+        assert "card_number" in fields  # still distinct, not replaced
+        schema = ocr_card.build_schema(card_type)
+        for side in ("front", "back"):
+            props = schema["schema"]["properties"][side]
+            assert "serial" in props["properties"]
+            # strict mode: every field must be in `required` or the call errors
+            assert "serial" in props["required"]
+
+
+def test_one_piece_does_not_gain_a_serial_field():
+    """OP cards aren't serial-numbered in this sense, the Output Shape spec
+    fixes their fields at two, and OP measured 10/10 on 2026-09-15. Adding an
+    always-null field to the one card type that reads perfectly is pure risk.
+    """
+    assert "serial" not in ocr_card.FIELDS_BY_CARD_TYPE["one_piece"]
+
+
+def test_serial_and_card_number_no_longer_collide():
+    """The exact 2026-09-15 failure: front '9/25' (serial), back '127' (card
+    number). Both readings correct, one column — merge_field saw a conflict and
+    dropped BOTH values. In separate fields each side is the only reading of
+    its own field, so nothing conflicts and nothing is lost.
+    """
+    result, _ = _run([_ocr_payload(
+        {"card_number": None, "serial": "9/25"},
+        {"card_number": "127", "serial": None},
+    )])
+    assert result["card_number"] == "127"
+    assert result["serial"] == "9/25"
+    assert result["needs_review"] == []
+
+
+def test_unnumbered_card_reports_no_serial():
+    """Most cards aren't numbered. Null must stay null — not an empty string,
+    which migration 010's CHECK rejects outright."""
+    result, _ = _run([_ocr_payload({"serial": None}, {"serial": None})])
+    assert result["serial"] is None
+    assert "serial" not in result["needs_review"]
 
 
 def test_conflicting_sides_are_flagged_not_silently_resolved():

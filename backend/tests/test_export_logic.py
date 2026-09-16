@@ -28,7 +28,10 @@ pytestmark = pytest.mark.unit
 client = TestClient(app)
 
 _HEADER = [
-    "player", "year", "set_name", "card_number", "card_type", "category",
+    # `serial` added by migration 010 (2026-09-16), sitting next to card_number
+    # because the two are routinely confused and adjacency makes a value in the
+    # wrong column obvious.
+    "player", "year", "set_name", "card_number", "serial", "card_type", "category",
     "position_type", "lane",
     "purchase_price", "shipping_in", "purchase_tax", "other_costs",
     "grading_cost", "all_in_cost",

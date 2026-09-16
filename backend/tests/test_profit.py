@@ -233,6 +233,67 @@ def test_invalid_position_type_rejected(bad):
 
 
 # --------------------------------------------------------------------------
+# CONTRACT 1b — the serial (migration 010)
+#
+# The mirror image of position_type: that one is immutable because correcting
+# it is an opportunity to launder a loss. This one IS patchable, because a
+# misread print run is a plain data-entry error with no incentive attached and
+# fixing it makes the record more true.
+# --------------------------------------------------------------------------
+def test_serial_is_patchable_and_settable():
+    assert "serial" in CardCreate.model_fields
+    assert "serial" in CardUpdate.model_fields
+
+
+def test_serial_defaults_to_none_meaning_not_numbered():
+    """NULL is a fact about the card (it isn't numbered), not missing data."""
+    card = CardCreate(player="p", year="2026", set_name="s", category="football")
+    assert card.serial is None
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_blank_serial_becomes_none_not_empty_string(blank):
+    """Migration 010's CHECK rejects ''. An empty text input in the browser
+    posts "", not null — so without normalization, leaving the (usually blank)
+    serial box alone would fail as an opaque Postgres 23514. That is exactly
+    the shape of the 2026-08-18 outage.
+    """
+    assert CardCreate(player="p", year="2026", set_name="s",
+                      category="football", serial=blank).serial is None
+    assert CardUpdate(serial=blank).serial is None
+
+
+def test_serial_is_trimmed_so_one_print_run_is_one_value():
+    """' 9/25' and '9/25' must not become two different serials. The DB CHECK
+    requires btrim(serial) = serial, so this is also what keeps it legal."""
+    assert CardCreate(player="p", year="2026", set_name="s",
+                      category="football", serial="  9/25  ").serial == "9/25"
+
+
+@pytest.mark.parametrize("serial", ["9/25", "1/1", "FOTL 12/99", "A/50", "/25"])
+def test_real_world_serial_formats_are_accepted(serial):
+    """Why this is free text and not two integers — see migration 010. Each of
+    these appears on real cards and none survives a number/number split."""
+    assert CardCreate(player="p", year="2026", set_name="s",
+                      category="football", serial=serial).serial == serial
+
+
+def test_overlong_serial_rejected_at_the_api_not_by_postgres():
+    """Mirrors the 32-char cap in migration 010, so a mis-parsed OCR blob
+    fails as a clean 422 rather than a 23514."""
+    with pytest.raises(Exception):
+        CardCreate(player="p", year="2026", set_name="s",
+                   category="football", serial="x" * 33)
+
+
+def test_clearing_a_serial_is_expressible_on_patch():
+    """A serial entered wrongly must be removable. `exclude_unset` means an
+    omitted field isn't written, so the explicit "" -> None is the only way to
+    say 'this card is not numbered after all'."""
+    assert CardUpdate(serial="").model_dump(exclude_unset=True) == {"serial": None}
+
+
+# --------------------------------------------------------------------------
 # CONTRACT 2 — close-out requires fees
 # --------------------------------------------------------------------------
 def test_close_out_requires_fees():

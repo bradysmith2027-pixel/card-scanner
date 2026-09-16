@@ -12,7 +12,7 @@ from decimal import Decimal
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from app import profit
 from app.auth import AuthedUser, current_user
@@ -31,6 +31,40 @@ Money = Annotated[Decimal, Field(ge=0, le=10_000_000)]
 # reaching Postgres and coming back as an opaque 23514 — which is exactly how
 # the 2026-08-18 outage happened (a free-text field against a constrained
 # column). Keep these in sync with the migration; all values are lowercase.
+def _blank_to_none(value):
+    """Trim a string field, and turn an empty result into None.
+
+    This exists for migration 010's `serial` CHECK, which rejects both '' and
+    values with surrounding whitespace. An empty text input in the browser
+    posts "", not null — so without this, leaving the (usually blank) serial
+    box alone would fail as an opaque Postgres 23514, which is precisely the
+    shape of the 2026-08-18 outage.
+
+    Normalizing rather than 422-ing is deliberate: blank means "this card is
+    not numbered", which is the common case and a legitimate answer, not a
+    validation error. On PATCH it doubles as the way to CLEAR a serial that
+    was entered wrongly.
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
+
+
+# Serial / print run as printed ("9/25", "1/1", "FOTL 12/99"). Mirrors the
+# CHECK in migration 010 so an over-long value fails as a clean 422 here
+# instead of a 23514 from Postgres. Deliberately free text — see the migration
+# for why this is not two integers.
+#
+# ⚠️ `max_length` is on the INNER str, not on the Optional. Written as
+# `Annotated[Optional[str], Field(max_length=32)]` pydantic applies the length
+# check to the whole union and raises TypeError on None — so clearing a serial
+# (the "" -> None path below) would 500 instead of writing NULL. Caught by
+# test_clearing_a_serial_is_expressible_on_patch; keep that test.
+Serial = Annotated[
+    Optional[Annotated[str, Field(max_length=32)]],
+    BeforeValidator(_blank_to_none),
+]
+
 PositionType = Literal["flip", "hold"]
 Lane = Literal["graded_arb", "raw_to_grade", "sealed", "optcg", "other"]
 SaleChannel = Literal["discord", "facebook", "instagram", "ebay", "show", "other"]
@@ -51,6 +85,8 @@ class Card(BaseModel):
     year: str
     set_name: str
     card_number: Optional[str] = None
+    # --- migration 010: the print run, as printed. NULL = not numbered. ---
+    serial: Optional[str] = None
     category: Optional[str] = None
     card_type: Optional[str] = None
     purchase_price: Optional[Decimal] = None
@@ -107,6 +143,10 @@ class CardCreate(BaseModel):
 
     # Optional.
     card_number: Optional[str] = None
+    # ⚠️ NOT the card number. This is the stamped print run ("9/25" = card 9 of
+    # 25 made). Leave it null for an unnumbered card — that is the common case
+    # and a real answer, not missing data. See migration 010.
+    serial: Serial = None
     card_type: Optional[str] = None  # finish/parallel: refractor, blue refractor, ... (user-picked)
     # ⚠️ CARD PRICE ONLY — shipping and tax are separate fields below. This
     # differs from the spreadsheet-era convention where purchase_price was
@@ -210,6 +250,10 @@ class CardUpdate(BaseModel):
     set_name: Optional[str] = Field(default=None, min_length=1)
     category: Optional[str] = Field(default=None, min_length=1)
     card_number: Optional[str] = None
+    # Patchable, unlike position_type: a misread serial is a data-entry error
+    # with no incentive attached, and correcting it makes the record MORE true.
+    # Sending "" clears it (see _blank_to_none).
+    serial: Serial = None
     card_type: Optional[str] = None
     purchase_price: Optional[Money] = None
     purchase_date: Optional[date] = None
