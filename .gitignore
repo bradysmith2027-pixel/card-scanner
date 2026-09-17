@@ -65,3 +65,6 @@ import/*.json
 [C] card-backup-*.json
 *-backup-*.json
 import/*.md
+
+# Database snapshots — business data, and this repo is PUBLIC.
+backups/
