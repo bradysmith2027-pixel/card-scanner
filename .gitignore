@@ -64,3 +64,4 @@ import/*.csv
 import/*.json
 [C] card-backup-*.json
 *-backup-*.json
+import/*.md
