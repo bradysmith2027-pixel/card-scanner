@@ -93,6 +93,23 @@ class Settings:
         # whole point is that forgetting a variable can never open the door.
         self.allow_open_access = _bool_env("ALLOW_OPEN_ACCESS", False)
 
+        # READ-ONLY VIEWERS (2026-09-17). Emails here may sign in and READ, but
+        # every mutating request is refused at the API.
+        #
+        # These emails must ALSO appear in ALLOWED_EMAILS — this list restricts,
+        # it does not grant. A viewer additionally needs a `viewer_grants` row
+        # (migration 011) or RLS returns them an empty dashboard.
+        #
+        # Why this exists when RLS already blocks writes: RLS stops a viewer
+        # writing to the OWNER's rows, but nothing stops them creating rows of
+        # their own under their own user_id. Harmless, but it makes a "read-only"
+        # account able to write, which is exactly the kind of surprise a
+        # permission model should not have.
+        raw_readonly = os.environ.get("READONLY_EMAILS", "")
+        self.readonly_emails = [
+            e.strip().lower() for e in raw_readonly.split(",") if e.strip()
+        ]
+
         # Interactive API docs (/docs, /redoc, /openapi.json). Default OFF so
         # production doesn't publish the full API surface to the internet.
         # Set ENABLE_DOCS=true locally for development.

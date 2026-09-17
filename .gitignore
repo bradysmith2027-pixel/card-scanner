@@ -55,3 +55,12 @@ COMMANDS.md
 # --- OS junk ---
 .DS_Store
 Thumbs.db
+
+# ---- Business data — NEVER commit. This repo is PUBLIC. ----
+# Added 2026-09-17 after `git add -A` staged the full sales history (every
+# purchase price, sale price, margin, seller and buyer name) into a public
+# repo. Caught before push. The importer CODE is tracked; the DATA is not.
+import/*.csv
+import/*.json
+[C] card-backup-*.json
+*-backup-*.json

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import PyJWKClient
 
@@ -46,6 +46,7 @@ _ALGORITHMS = ["ES256"]
 class AuthedUser:
     id: str          # Supabase auth user id (the JWT "sub" claim)
     token: str       # raw access token, forwarded to Supabase for RLS
+    readonly: bool = False   # True for granted viewers; blocks every write
 
 
 @lru_cache
@@ -61,6 +62,7 @@ def _jwks_client() -> PyJWKClient:
 
 
 def current_user(
+    request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> AuthedUser:
     if creds is None or not creds.credentials:
@@ -134,4 +136,22 @@ def current_user(
             ),
         )
 
-    return AuthedUser(id=user_id, token=token)
+    # READ-ONLY VIEWERS (2026-09-17).
+    #
+    # Enforced HERE, on the method, rather than as a per-route dependency, and
+    # that is deliberate: a per-route guard has to be remembered on every future
+    # mutating endpoint, and the one time it is forgotten the account silently
+    # stops being read-only. Checking the HTTP method in the one dependency that
+    # every protected route already uses cannot be forgotten.
+    #
+    # RLS (migration 011) is still the real boundary for the OWNER's data; this
+    # stops a viewer creating rows under their own user_id, which RLS permits.
+    email = (payload.get("email") or "").lower()
+    readonly = bool(email) and email in settings.readonly_emails
+    if readonly and request.method not in ("GET", "HEAD", "OPTIONS"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has read-only access.",
+        )
+
+    return AuthedUser(id=user_id, token=token, readonly=readonly)
