@@ -151,3 +151,72 @@ def test_smtp_default_sender_uses_the_gmail_account():
         "Dreamboat Slabs <dreamboat.slabs@gmail.com>", "a@b.com", "s", "t"
     )
     assert "dreamboat.slabs@gmail.com" in msg["From"]
+
+
+# ==========================================================================
+# Brevo transport (added 2026-09-30)
+# ==========================================================================
+
+
+def test_brevo_auth_header_is_api_key_not_bearer():
+    """🔴 REGRESSION GUARD. Brevo authenticates with a bare `api-key` header.
+
+    Sending `Authorization: Bearer <key>` returns 401 with a message about a
+    missing key — which reads exactly like a WRONG key and sends you off to
+    regenerate a perfectly good one. Same shape as the Resend/Cloudflare 1010
+    trap that the User-Agent test above pins.
+    """
+    headers = mailer.build_brevo_headers("secret-key")
+    assert headers["api-key"] == "secret-key"
+    assert "Authorization" not in headers
+
+
+def test_brevo_splits_display_name_from_address():
+    """Brevo wants name and email as separate keys, unlike SMTP and Resend."""
+    assert mailer.split_address("Dreamboat Slabs <d@gmail.com>") == {
+        "name": "Dreamboat Slabs",
+        "email": "d@gmail.com",
+    }
+    assert mailer.split_address("d@gmail.com") == {"email": "d@gmail.com"}
+
+
+def test_brevo_payload_shape():
+    payload = mailer.build_brevo_payload(
+        "Dreamboat Slabs <d@gmail.com>", "a@b.com", "Weekly", "body",
+    )
+    assert payload["sender"]["email"] == "d@gmail.com"
+    assert payload["to"] == [{"email": "a@b.com"}]
+    assert payload["textContent"] == "body"
+    assert "<pre" in payload["htmlContent"]
+
+
+def test_brevo_omits_empty_cc_and_bcc():
+    """Brevo rejects [] on these keys, so they must be absent, not empty."""
+    payload = mailer.build_brevo_payload(
+        "d@gmail.com", "a@b.com", "s", "t", cc=None, bcc="",
+    )
+    assert "cc" not in payload
+    assert "bcc" not in payload
+
+    with_cc = mailer.build_brevo_payload(
+        "d@gmail.com", "a@b.com", "s", "t", cc="x@y.com,z@y.com",
+    )
+    assert with_cc["cc"] == [{"email": "x@y.com"}, {"email": "z@y.com"}]
+
+
+def test_brevo_refuses_to_send_without_key_or_sender():
+    """Fail on a named, actionable cause rather than a 400 from the provider."""
+    with pytest.raises(mailer.MailError) as e:
+        mailer.send_brevo("", "a@b.com", "s", "t", "d@gmail.com")
+    assert "BREVO_API_KEY" in str(e.value)
+
+    with pytest.raises(mailer.MailError) as e:
+        mailer.send_brevo("key", "a@b.com", "s", "t", "")
+    assert "Brevo" in str(e.value) or "sender" in str(e.value).lower()
+
+
+def test_brevo_payload_validates_like_the_other_transports():
+    with pytest.raises(ValueError):
+        mailer.build_brevo_payload("d@gmail.com", [], "s", "t")
+    with pytest.raises(ValueError):
+        mailer.build_brevo_payload("d@gmail.com", "a@b.com", "   ", "t")

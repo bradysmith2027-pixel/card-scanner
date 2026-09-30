@@ -1,7 +1,13 @@
 """mailer.py — send a report by email.
 
-Two transports:
-  * `send_smtp`  — Gmail SMTP. THE ONE IN USE (chosen 2026-09-29).
+Three transports. `weekly_report.py` picks one at runtime: Brevo if
+`BREVO_API_KEY` is set, otherwise Gmail SMTP.
+  * `send_brevo` — Brevo HTTPS API. THE ONE RAILWAY USES (chosen 2026-09-30),
+                   because Railway blocks outbound SMTP in the runtime
+                   container below the Pro plan. See the Brevo section below.
+  * `send_smtp`  — Gmail SMTP. Still the one the LAPTOP uses, and still the
+                   best deliverability, since it sends genuinely as the Gmail
+                   account. Works anywhere port 587 is open.
   * `send`       — Resend HTTP API. Kept, working and tested, for the day
                    `dreamboatslabs.xyz` comes off clientHold and a proper
                    sending domain exists.
@@ -286,3 +292,138 @@ def send_smtp(
         raise MailError(f"SMTP send failed: {e}") from e
 
     return str(msg["Message-ID"])
+
+
+# ==========================================================================
+# Brevo HTTP transport
+# ==========================================================================
+# Chosen 2026-09-30, after the Railway cron service proved it cannot use SMTP.
+#
+# 🔴 THE FINDING THAT FORCED THIS: Railway blocks outbound SMTP (25/465/587/
+# 2525) in the RUNTIME container on plans below Pro, but NOT in the build
+# environment. The same commit, same credentials, sent fine at 16:13 from a
+# build command and died at 16:27 from the deployed process with
+# `[Errno 101] Network is unreachable`. HTTPS on 443 works in both — the same
+# failing run had already made three successful Supabase calls before it
+# reached the mail step.
+#
+# ⚠️ DO NOT "fix" runtime SMTP by moving the report into a build command. It
+# would fire on every build, never on a schedule, and not at all on a Sunday,
+# because a cron service only builds when the code changes. It would look like
+# it worked and then quietly stop.
+#
+# Brevo over Resend: Resend sends only from a DNS-verified domain, and both of
+# Brady's domains are on clientHold. Brevo verifies a SINGLE SENDER ADDRESS by
+# emailing it a code, so `dreamboat.slabs@gmail.com` can send with no domain.
+
+BREVO_ENDPOINT = "https://api.brevo.com/v3/smtp/email"
+
+
+def split_address(value: str) -> dict:
+    """`"Name <a@b.com>"` -> `{"name": ..., "email": ...}`; bare -> email only.
+
+    Pure. Brevo wants the display name and the address as separate JSON keys,
+    unlike Resend and SMTP which both take one combined header string.
+    """
+    value = (value or "").strip()
+    if value.endswith(">") and "<" in value:
+        name, _, rest = value.rpartition("<")
+        return {"email": rest[:-1].strip(), "name": name.strip().strip('"')}
+    return {"email": value}
+
+
+def build_brevo_payload(
+    sender: str,
+    to: str | list[str],
+    subject: str,
+    text: str,
+    cc: str | list[str] | None = None,
+    bcc: str | list[str] | None = None,
+    html: Optional[str] = None,
+) -> dict:
+    """Assemble the Brevo request body. Pure — no network, no key needed.
+
+    🔴 The sender address MUST be one Brevo has verified, or the API returns
+    400 `sender_not_valid`. Verification is per-ADDRESS here, not per-domain.
+    """
+    recipients = _addresses(to)
+    if not recipients:
+        raise ValueError("no recipients")
+    if not subject.strip():
+        raise ValueError("subject is empty")
+
+    payload = {
+        "sender": split_address(sender),
+        "to": [{"email": a} for a in recipients],
+        "subject": subject,
+        "textContent": text,
+        "htmlContent": html or text_to_html(text),
+    }
+    # Omit rather than send empty arrays — Brevo rejects [] on these keys.
+    cc_list = _addresses(cc)
+    bcc_list = _addresses(bcc)
+    if cc_list:
+        payload["cc"] = [{"email": a} for a in cc_list]
+    if bcc_list:
+        payload["bcc"] = [{"email": a} for a in bcc_list]
+    return payload
+
+
+def build_brevo_headers(api_key: str) -> dict:
+    """Request headers. Pure, so the api-key rule can be tested.
+
+    🔴 Brevo authenticates with a bare `api-key` header, NOT
+    `Authorization: Bearer`. Sending Bearer returns 401 with a message about a
+    missing key, which reads exactly like a wrong key and sends you to
+    regenerate a perfectly good one.
+    """
+    return {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+
+
+def send_brevo(
+    api_key: str,
+    to: str | list[str],
+    subject: str,
+    text: str,
+    sender: str,
+    cc: str | list[str] | None = None,
+    bcc: str | list[str] | None = None,
+    html: Optional[str] = None,
+    timeout: int = 20,
+) -> str:
+    """Send one email via Brevo's HTTPS API. Returns the provider message id.
+
+    Raises MailError on any non-2xx — loudly, and WITHOUT the body that failed
+    to send, because the report carries purchase prices and margins.
+    """
+    if not api_key:
+        raise MailError("BREVO_API_KEY is not set")
+    if not sender:
+        raise MailError(
+            "No sender address. Set REPORT_FROM or GMAIL_USER to the address "
+            "verified in Brevo under Senders."
+        )
+
+    payload = build_brevo_payload(
+        sender, to, subject, text, cc=cc, bcc=bcc, html=html
+    )
+    req = urllib.request.Request(
+        BREVO_ENDPOINT,
+        data=json.dumps(payload).encode(),
+        headers=build_brevo_headers(api_key),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode() or "{}")
+            return str(body.get("messageId", ""))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:400]
+        raise MailError(f"Brevo returned {e.code}: {detail}") from e
+    except Exception as e:  # network down, DNS, timeout
+        raise MailError(f"Brevo request failed: {e}") from e

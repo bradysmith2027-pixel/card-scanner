@@ -121,8 +121,14 @@ def main() -> None:
 
     required = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "REPORT_ACCOUNT_EMAIL",
                 "REPORT_ACCOUNT_PASSWORD"]
+    # Transport is chosen by which key is present, so the laptop keeps using
+    # Gmail SMTP untouched while Railway uses Brevo. Railway blocks outbound
+    # SMTP in the runtime container below Pro; HTTPS works in both places.
+    use_brevo = bool(env.get("BREVO_API_KEY"))
     if not (dry_run or preview):
-        required += ["GMAIL_USER", "GMAIL_APP_PASSWORD", "REPORT_TO"]
+        required += ["REPORT_TO"]
+        required += ["BREVO_API_KEY"] if use_brevo else [
+            "GMAIL_USER", "GMAIL_APP_PASSWORD"]
     missing = [k for k in required if not env.get(k)]
     if missing:
         # Names only. Never echo a value — printing a secret to prove it is set
@@ -171,17 +177,37 @@ def main() -> None:
     recipients = mailer._addresses(env["REPORT_TO"])
     cc = mailer._addresses(env.get("REPORT_CC"))
     bcc = mailer._addresses(env.get("REPORT_BCC"))
-    message_id = mailer.send_smtp(
-        env["GMAIL_USER"],
-        env["GMAIL_APP_PASSWORD"],
-        recipients,
-        subject,
-        text,
-        cc=cc,
-        bcc=bcc,
-        sender=env.get("REPORT_FROM"),
-        html=html,
-    )
+    if use_brevo:
+        # The From address must be VERIFIED IN BREVO under Senders, or the API
+        # returns 400 sender_not_valid. Verification is per-address, not
+        # per-domain — which is the whole reason Brevo works here and Resend
+        # does not, with both domains still on clientHold.
+        sender = env.get("REPORT_FROM") or (
+            f"Dreamboat Slabs <{env['GMAIL_USER']}>" if env.get("GMAIL_USER")
+            else ""
+        )
+        message_id = mailer.send_brevo(
+            env["BREVO_API_KEY"],
+            recipients,
+            subject,
+            text,
+            sender,
+            cc=cc,
+            bcc=bcc,
+            html=html,
+        )
+    else:
+        message_id = mailer.send_smtp(
+            env["GMAIL_USER"],
+            env["GMAIL_APP_PASSWORD"],
+            recipients,
+            subject,
+            text,
+            cc=cc,
+            bcc=bcc,
+            sender=env.get("REPORT_FROM"),
+            html=html,
+        )
 
     # Counts only — never content, and never the addresses themselves.
     print(
