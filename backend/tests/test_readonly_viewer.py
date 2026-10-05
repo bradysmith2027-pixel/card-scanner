@@ -1,18 +1,16 @@
 """
-test_readonly_viewer.py — the READONLY_EMAILS guard (2026-09-17).
+test_readonly_viewer.py
 
-WHY THESE TESTS EXIST
-    A permission check with no test is not a permission check. The specific
-    failure this guards against is the one CLAUDE.md already records from
-    2026-09-13: a test that still passes under broken code. So the important
-    assertions here are the NEGATIVE ones — that a write is actually refused —
-    and `test_guard_is_not_vacuous`, which fails if READONLY_EMAILS stops being
-    read at all.
+Tests for read-only accounts (READONLY_EMAILS).
 
-    These call `current_user` directly rather than going through the API,
-    because conftest.py overrides `current_user` for every route test. A test
-    driving the endpoints would exercise the override, not the real dependency,
-    and would pass no matter what this code did.
+The tests that matter most are the ones checking that changes actually get
+blocked, plus test_guard_is_not_vacuous, which fails if READONLY_EMAILS stops
+being checked at all. I've had a test pass on broken code before, so I want
+to be sure these can actually fail.
+
+These call current_user directly instead of going through the API, because
+conftest.py replaces current_user for all the route tests. Going through the
+API would just test the fake version and pass no matter what.
 """
 
 from types import SimpleNamespace
@@ -29,7 +27,7 @@ VIEWER = "viewer@example.com"
 
 
 class _Settings(SimpleNamespace):
-    """Minimal stand-in for the real Settings object."""
+    """A simple fake of the real Settings object."""
 
 
 def _settings(readonly=(), allowed=(OWNER, VIEWER)):
@@ -41,13 +39,13 @@ def _settings(readonly=(), allowed=(OWNER, VIEWER)):
 
 
 def _call(monkeypatch, *, email, method, readonly_emails=(VIEWER,)):
-    """Invoke current_user with a forged-but-already-verified payload."""
+    """Call current_user with a made up token that counts as already checked."""
     monkeypatch.setattr(auth, "get_settings", lambda: _settings(readonly_emails))
     monkeypatch.setattr(
         auth, "_decode", lambda token: {"sub": "uid-123", "email": email}, raising=False
     )
-    # Bypass signature verification — that path has its own coverage; here we
-    # care only about what happens AFTER a token is known to be valid.
+    # Skip the signature check. That's tested somewhere else, this only cares
+    # about what happens after the token is good.
     monkeypatch.setattr(
         auth.jwt, "decode", lambda *a, **k: {"sub": "uid-123", "email": email}
     )
@@ -72,7 +70,7 @@ def test_viewer_may_read(monkeypatch, method):
 
 
 # --------------------------------------------------------------------------
-# The viewer cannot write. These are the assertions that matter.
+# The viewer can't change anything. These are the important ones.
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("method", ["POST", "PATCH", "PUT", "DELETE"])
@@ -84,11 +82,10 @@ def test_viewer_write_is_refused(monkeypatch, method):
 
 
 def test_viewer_cannot_write_even_to_their_own_rows(monkeypatch):
-    """RLS permits a viewer to insert rows under their OWN user_id.
+    """RLS would let a viewer add cards under their own user_id.
 
-    That is the gap this guard closes: without it, an account described to the
-    user as 'read-only' can still create data. The 403 must come from the API,
-    because the database will not object.
+    That's what this blocks. Without it a "read-only" account could still add
+    stuff. The 403 has to come from the API since the database won't stop it.
     """
     with pytest.raises(HTTPException) as exc:
         _call(monkeypatch, email=VIEWER, method="POST")
@@ -96,7 +93,7 @@ def test_viewer_cannot_write_even_to_their_own_rows(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# The owner is unaffected.
+# The owner (me) isn't affected.
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("method", ["GET", "POST", "PATCH", "DELETE"])
@@ -111,15 +108,14 @@ def test_email_match_is_case_insensitive(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# The guard must not be vacuous.
+# Make sure the check can actually fail.
 # --------------------------------------------------------------------------
 
 def test_guard_is_not_vacuous(monkeypatch):
-    """With READONLY_EMAILS empty, the same POST must SUCCEED.
+    """With READONLY_EMAILS empty, the same POST should work.
 
-    Without this, every assertion above would still pass if the guard rejected
-    everything, or if readonly_emails were never consulted. This is the control
-    that makes the rest of the file meaningful.
+    Without this, all the tests above would still pass if the check just blocked
+    everyone, or if readonly_emails was never looked at.
     """
     user = _call(monkeypatch, email=VIEWER, method="POST", readonly_emails=())
     assert user.readonly is False

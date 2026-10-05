@@ -1,39 +1,25 @@
 """
-[C] eval_fullcard.py -- can GPT-4o read a WHOLE card, with no detector at all?
+eval_fullcard.py: can GPT-4o read a whole card without the detector?
 
-WHY THIS EXISTS (2026-09-15)
-    /scan has been down since August. Every route back to a self-hosted detector
-    is blocked: Roboflow hosted inference is out of credits (402), raw weight
-    export needs a paid Core plan (Brady: not paying again), and retraining
-    YOLOv8n in Colab lands on Ultralytics' AGPL-3.0 -- the exact licensing the
-    project rejected on 2026-07-20 for a commercial networked app.
+/scan was down because I couldn't run my detector without paying for Roboflow
+credits or the model weights, and I didn't want to pay again.
 
-    So this asks the question that dissolves all three: DOES THE DETECTOR NEED
-    TO EXIST? Its only job is cropping fields so OCR is easier. GPT-4o does the
-    actual reading. `ocr_card.build_messages` takes a plain {label: image} dict
-    and everything downstream -- schema, front/back merge, needs_review -- never
-    touches a bounding box.
+So this tests if I even need the detector. All it does is crop the fields so
+they're easier to read. GPT-4o does the actual reading, and everything after
+that (schema, front/back merge, needs_review) never looks at the boxes. If
+reading the whole card works well enough, I don't need Roboflow at all.
 
-    If full-card reads well enough, Roboflow, torch, credits, ONNX and the AGPL
-    question all get deleted rather than worked around.
+This isn't comparing the two ways side by side. The detector can't run on this
+laptop right now (no torch installed and Roboflow returns 402). It just runs
+the new way and shows what it read, and I check it against the real cards.
 
-WHAT THIS IS NOT
-    ⚠️ NOT an A/B against the current pipeline. The YOLO path CANNOT RUN on this
-    machine: `inference` is not installed (the venv was rebuilt from
-    backend/requirements.txt, which deliberately has no torch) and the hosted
-    endpoint 402s. Comparing would mean a 2-4 GB install. This measures the NEW
-    path on its own and reports what it read; Brady judges against the real
-    cards. "Is full-card good enough?" is the decision, not "is it better?"
+It uses ocr_card's FIELDS_BY_CARD_TYPE, build_schema, normalize and merge_field
+on purpose so it tests the real code, not a copy. Only the messages change.
 
-    ⚠️ Re-uses ocr_card's FIELDS_BY_CARD_TYPE, build_schema, normalize and
-    merge_field ON PURPOSE, so this tests the real downstream logic and not a
-    parallel copy of it. Only the message-building changes.
+Cost: one GPT-4o call per card. It prints the tokens and a running total.
+Start with --limit 5.
 
-COST
-    One GPT-4o call per card (not per field). Prints token usage and a running
-    estimate. Start with --limit 5 before spending anything real.
-
-USAGE
+Usage:
     python "[C] eval_fullcard.py" --category one_piece --limit 5
     python "[C] eval_fullcard.py" --category all --limit 12 --json out.json
 """
@@ -53,7 +39,7 @@ from vision.ocr_card import (  # noqa: E402
     merge_field,
 )
 
-# Project root holds the dataset folders (Topps/, Panini/, One Piece/).
+# The dataset folders (Topps/, Panini/, One Piece/) are in the project root.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CATEGORY_DIRS = {
@@ -62,21 +48,20 @@ CATEGORY_DIRS = {
     "one_piece": "One Piece",
 }
 
-# gpt-4o pricing per 1M tokens (USD). Update if the rate changes -- this is only
-# used for a rough running total so nobody is surprised by the bill.
+# gpt-4o price per 1M tokens (USD). Only used for a rough total so I know what
+# it's costing. Update it if the price changes.
 PRICE_IN_PER_M = 2.50
 PRICE_OUT_PER_M = 10.00
 
-# The only known text ground truth recorded anywhere in the vault, from the
-# 2026-07-08 daily log. Auto-checked so at least two rows are objective.
+# The only two cards I have the exact right answers for. These get checked
+# automatically.
 KNOWN_TRUTH = {
     "op_001": {"card_number": "OP01-024"},
     "op_005": {"card_number": "OP03-102"},
 }
 
-# The prompt, image encoding and message building all live in
-# vision/ocr_card.py and are IMPORTED above. This script deliberately keeps no
-# copy of them, so what it measures is exactly what production runs.
+# The prompt and message building are imported from vision/ocr_card.py above,
+# not copied, so this tests exactly what production runs.
 
 
 def discover_cards(category, limit):
@@ -112,9 +97,8 @@ def discover_cards(category, limit):
 
 
 def read_card(client, card_type, front_path, back_path):
-    # Calls the PRODUCTION message builder on decoded images, not a local copy
-    # of the prompt. An eval that drifts from the code it measures is worse
-    # than no eval -- the same "one definition" rule that profit.py exists for.
+    # Uses the real message builder, not a copy of the prompt. If this drifted
+    # from the real code the results wouldn't mean anything.
     import cv2
 
     front_img = cv2.imread(front_path)
@@ -131,8 +115,8 @@ def read_card(client, card_type, front_path, back_path):
     elapsed = time.time() - started
     raw = json.loads(response.choices[0].message.content)
 
-    # Same merge the real pipeline uses, so front/back agreement and the
-    # needs_review flagging are exercised, not bypassed.
+    # Same merge as the real scan, so the front/back matching and needs_review
+    # flags get tested too.
     merged, needs_review = {}, []
     for field in FIELDS_BY_CARD_TYPE[card_type]:
         value, conflict = merge_field(
@@ -144,9 +128,9 @@ def read_card(client, card_type, front_path, back_path):
             needs_review.append(field)
 
     usage = response.usage
-    # Keep the raw per-side readings. A merged NULL can mean two very different
-    # things -- "neither side could read it" vs "both read it fine but printed
-    # DIFFERENT numbers" -- and only the raw values distinguish them.
+    # Keep what each side read. A blank after merging could mean neither side
+    # could read it, or both read it fine but got different numbers. Only the
+    # raw readings tell you which.
     return merged, needs_review, usage, elapsed, raw
 
 
@@ -238,8 +222,8 @@ def main():
     print(f"Tokens          : {tok_in:,} in / {tok_out:,} out")
     print(f"Est. cost       : ${cost:.4f}  (~${cost / max(len(ok_cards), 1):.4f}/card)")
     print("=" * 78)
-    # No emoji here on purpose: the Windows console is cp1252 and a stray
-    # symbol crashed the whole run AFTER the results had been computed.
+    # No emoji on purpose. The Windows console can't print them and it crashed
+    # the whole run after all the results were done.
     print(
         "\nNOTE: a non-null rate is NOT accuracy -- a confidently wrong value counts\n"
         "      as filled. Check these against the real cards before trusting it.\n"

@@ -1,52 +1,39 @@
 """
-trade_basis.py — carry-over basis for trades. Pure math, no database.
+trade_basis.py
 
-WHY THIS MODULE EXISTS (2026-09-14)
-    A trade is NOT a sale. Nothing is realized when cards change hands; the
-    cost basis simply moves from what you gave up to what you received.
+Moves the cost of the cards I trade away onto the cards I get back.
 
-    Before this module the app had no concept of a trade at all. The `trades`
-    and `trade_items` tables existed in Supabase but NO application code
-    touched them — no router, no endpoint, no UI. Trades were being recorded
-    in the old spreadsheet as break-even SALES, which corrupts four things at
-    once:
+A trade isn't a sale. I don't make or lose money when cards change hands, the
+cost just moves from what I gave up to what I got.
 
-        ROI            — a fake $0-profit row averages into every return figure
-        sell-through   — a trade counts as a sale that never happened
-        hold time      — the clock stops on a card you effectively still hold
-        cost basis     — the received card arrives from nowhere, basis $0
+In my old spreadsheet I was logging trades as sales that broke even, which
+messed up a few things:
 
-    The last one is the expensive one. A card with $0 basis reports its entire
-    eventual sale price as profit. Trade into a card and flip it, and the app
-    tells you that you made 100% margin on money you actually spent months ago.
+    ROI           - a fake $0 profit sale gets averaged into everything
+    sell-through  - counts a sale that never happened
+    hold time     - stops the clock on a card I basically still have
+    cost          - the card I got back shows up with a $0 cost
 
-THE DEFINITION
+The last one is the big problem. If a card has a $0 cost, the whole sale price
+counts as profit when I sell it, even though I really paid for it months ago.
 
-    total_basis = sum(all_in_cost of every card GIVEN) + cash_boot
+How it works:
 
-    cash_boot is SIGNED, from Brady's point of view:
-        positive  -> Brady PAID cash on top of the cards (adds to basis)
-        negative  -> Brady RECEIVED cash (reduces basis)
+    total_basis = all_in_cost of every card I GAVE + cash_boot
 
-    That total is then allocated across the cards RECEIVED, pro-rata by their
-    estimated market value.
+    cash_boot can be positive or negative:
+        positive -> I paid cash on top of my cards (adds to the cost)
+        negative -> I got cash back (takes away from the cost)
 
-WHY PRO-RATA AND NOT AN EVEN SPLIT
-    Identical reasoning to lot allocation. Trade two commons for one big card
-    and an even split would hand the big card a trivial basis, so its eventual
-    sale looks like a windfall. Pro-rata keeps basis proportional to what each
-    card is actually worth, which is the only allocation that leaves per-card
-    ROI meaningful.
+    Then that total gets split across the cards I GOT based on what each one
+    is worth, not evenly. If I trade two commons for one big card and split it
+    evenly, the big card would barely have any cost and would look like a huge
+    win when I sell it.
 
-THE PENNY RULE
-    Allocations are reconciled with largest-remainder so the parts sum EXACTLY
-    to the total. Naive rounding leaks cents on every multi-card trade, and
-    leaked cents mean the books stop balancing in a way nobody can later trace.
+The split adds up to the total exactly, to the cent (see allocation.py).
 
-PURE BY DESIGN
-    No database, no I/O. The caller fetches the outgoing cards' all-in costs
-    (via profit.all_in_cost) and passes the numbers in. Same contract as
-    profit.py, and unit-testable without a live Supabase.
+No database stuff in here. The caller gets the all_in_cost of the cards I'm
+giving up from profit.py and passes the numbers in.
 """
 
 from __future__ import annotations
@@ -61,11 +48,11 @@ _CENTS = Decimal("0.01")
 
 
 class TradeBasisError(ValueError):
-    """Raised when a trade cannot be expressed as a carry-over-basis event."""
+    """Error for when a trade can't be worked out."""
 
 
 def _money(value: Any) -> Decimal:
-    """Coerce to Decimal money. None/garbage -> 0, matching profit.py."""
+    """Turn a value into a Decimal. Blank or bad values become 0, same as profit.py."""
     if value is None or value == "":
         return Decimal(0)
     if isinstance(value, Decimal):
@@ -78,11 +65,10 @@ def _money(value: Any) -> Decimal:
 
 @dataclass(frozen=True)
 class ReceivedCard:
-    """A card coming IN on a trade.
+    """A card I'm getting in the trade.
 
-    `est_value` is the card's estimated market value at trade time and is used
-    ONLY to apportion basis. It is deliberately not persisted as a price —
-    it is an allocation weight, not a valuation claim.
+    est_value is about what the card is worth right now. It's only used to
+    split up the cost, it isn't saved as a price.
     """
 
     ref: str
@@ -109,14 +95,13 @@ def allocate_trade_basis(
     received: Sequence[ReceivedCard],
     cash_boot: Any = 0,
 ) -> TradeBasisResult:
-    """Carry basis from the cards given up onto the cards received.
+    """Move the cost from the cards I gave up onto the cards I got.
 
-    Returns allocations keyed by each ReceivedCard.ref, guaranteed to sum
-    exactly to total_basis.
+    Returns how much cost each received card gets (by ref). They always add up
+    to total_basis exactly.
 
-    `realized_gain` is normally 0. It is non-zero only in the boot-exceeds-
-    basis case described below, where accounting forces a gain to be
-    recognized because basis cannot go negative.
+    realized_gain is usually 0. It only matters if I got back more cash than
+    my cards cost me (see below).
     """
     if not received:
         raise TradeBasisError(
@@ -134,10 +119,9 @@ def allocate_trade_basis(
     boot = _money(cash_boot)
     total_basis = (outgoing_total + boot).quantize(_CENTS, rounding=ROUND_HALF_UP)
 
-    # Basis cannot be negative. If Brady received more cash than the basis he
-    # gave up, the excess is a REALIZED GAIN — he has been made whole in cash
-    # and then some. Clamping silently would hide real income, so it is
-    # returned explicitly for the caller to record.
+    # Cost can't go below 0. If I got more cash back than my cards cost me,
+    # the extra is real profit, so it gets returned as realized_gain instead
+    # of just disappearing.
     realized_gain = Decimal(0)
     if total_basis < 0:
         realized_gain = -total_basis
@@ -146,9 +130,8 @@ def allocate_trade_basis(
     weights = [_money(r.est_value) for r in received]
     weight_total = sum(weights, Decimal(0))
 
-    # No usable values -> even split, but say so. A silent even split is how
-    # per-card ROI data gets quietly destroyed; the caller should surface this
-    # and ask for values.
+    # No values entered, so split it evenly, but flag it so the app can ask me
+    # for values. An even split makes the per-card ROI pretty useless.
     even_split_fallback = weight_total <= 0
     if even_split_fallback:
         weights = [Decimal(1)] * len(received)

@@ -1,47 +1,41 @@
 -- ============================================================
 -- 008_trade_carry_over_basis.sql
--- Dreamboat Slabs — make a trade an accounting event instead of a fake sale.
+-- Makes a trade move the cost from one card to another instead of counting
+-- as a sale.
 --
--- WHY THIS EXISTS (2026-09-14):
---   The `trades` and `trade_items` tables have existed since the original
---   schema, but NO application code has ever touched them. There is no
---   trades router, no endpoint, no UI. Verified 2026-09-14: the only mention
---   of "trade" anywhere in app/ is a comment in profit.py.
+-- The trades and trade_items tables have been there since the start, but no
+-- code ever used them. No router, no endpoint, no screen.
 --
---   Meanwhile the old spreadsheet recorded trades as BREAK-EVEN SALES. That
---   single shortcut corrupts four metrics at once:
+-- In my old spreadsheet I logged trades as sales that broke even. That one
+-- shortcut messed up four things:
 --
---     ROI           — a fake $0-profit row averages into every return figure
---     sell-through  — a trade counts as a sale that never happened
---     hold time     — the clock stops on a card effectively still held
---     cost basis    — the received card arrives from nowhere, with basis $0
+--     ROI           - a fake $0 profit sale gets averaged into everything
+--     sell-through  - counts a sale that never happened
+--     hold time     - stops the clock on a card I basically still have
+--     cost          - the card I got back shows up with a $0 cost
 --
---   The last one is the expensive one. A $0-basis card reports its ENTIRE
---   eventual sale price as profit. Trade into a card, flip it, and the app
---   claims 100% margin on money actually spent months earlier.
+-- The last one is the big one. A card with a $0 cost shows its whole sale
+-- price as profit, even though I really paid for it months before.
 --
---   🔴 This migration must land BEFORE the historical spreadsheet import.
---   Importing first writes the distortion into the permanent record, where
---   it can never again be distinguished from real data.
+-- This had to go in before importing my spreadsheet. Otherwise the wrong
+-- numbers would get saved and I couldn't tell them apart from the real ones
+-- later.
 --
--- THE MODEL — carry-over basis
---   A trade realizes nothing. Basis moves:
+-- How it works:
+--   A trade doesn't make or lose money. The cost moves:
 --
 --     total_basis = SUM(all_in_cost of cards GIVEN) + cash_boot
 --
---   then allocates across the cards RECEIVED pro-rata by estimated value.
---   `app/trade_basis.py` is the single definition, the same way profit.py is
---   for profit. Nothing else is permitted to do this math.
+--   and gets split across the cards I GOT based on what each is worth. The
+--   math is only in app/trade_basis.py, same as profit.py for profit.
 --
--- ⚠️ WHY est_value IS NOT A PRICE
---   `trade_items.est_value` is an ALLOCATION WEIGHT, not a valuation claim
---   and not a sale price. It exists only to apportion basis. Never surface
---   it as "what the card is worth" and never feed it into profit.
+-- est_value isn't a price. It's only used to split up the cost. Don't show it
+-- as what the card is worth and don't use it in profit.
 -- ============================================================
 
 
 -- ============================================================
--- trades — cash boot and the one case that realizes income
+-- trades: cash added or received, and the one case where it's profit
 -- ============================================================
 
 ALTER TABLE trades
@@ -67,7 +61,7 @@ ALTER TABLE trades
 
 
 -- ============================================================
--- trade_items — allocation weight and the resulting basis
+-- trade_items: the value used to split the cost, and the cost each card got
 -- ============================================================
 
 ALTER TABLE trade_items
@@ -101,10 +95,10 @@ ALTER TABLE trade_items
 
 
 -- ============================================================
--- Indexes — the lookups the trade lineage actually needs
+-- Indexes for looking up trade history
 -- ============================================================
 
--- "How did this card get here / where did it go?" walks trade_items by card.
+-- "Where did this card come from / where did it go?" looks up trade_items by card.
 CREATE INDEX IF NOT EXISTS idx_trade_items_card_id
   ON trade_items (card_id);
 
@@ -113,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_trade_items_trade_id
 
 
 -- ============================================================
--- VERIFY (run after applying)
+-- Check it worked (run after applying)
 -- ============================================================
 --
 --   SELECT column_name, data_type, column_default, is_nullable
@@ -121,8 +115,8 @@ CREATE INDEX IF NOT EXISTS idx_trade_items_trade_id
 --   WHERE table_name IN ('trades','trade_items')
 --   ORDER BY table_name, ordinal_position;
 --
---   -- Every trade must balance: basis out + boot = basis in.
---   -- This should return ZERO rows. Any row is a broken trade.
+--   -- Every trade should balance: cost out + cash = cost in.
+--   -- This should return nothing. Any row is a trade that's off.
 --   SELECT t.id,
 --          t.cash_boot,
 --          SUM(ti.allocated_basis) FILTER (WHERE ti.direction = 'received')

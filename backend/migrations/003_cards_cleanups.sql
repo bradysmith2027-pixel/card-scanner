@@ -1,31 +1,24 @@
 -- ============================================================
 -- 003_cards_cleanups.sql
--- Dreamboat Slabs — cards table taxonomy cleanup + updated_at (punch list #1 + #2).
+-- Cleans up some column names on cards and adds updated_at.
 --
--- Decisions (2026-07-23, with Brady):
---   1. RENAME `variation` -> `card_type`. This column holds the finish/parallel
---      (refractor, blue refractor, green refractor, electric, ...), picked
---      MANUALLY by the user since the vision model can't read a card's color.
---      Renaming (not add+drop) preserves any existing data. Stays nullable
---      (a base card has no parallel).
---   2. RENAME `sport` -> `category`. Holds the specific card subject/type:
---      basketball, football, soccer, tennis, golf, one piece, pokemon, etc.
---      Stays NOT NULL (required) — value is user-entered or model-guessed from
---      the set. Existing `sport` values (basketball/football) map cleanly.
---      No `brand` column: brand is carried by set_name (Topps Chrome, Panini
---      Prizm, ...), so a separate brand column isn't needed.
---   3. ADD `updated_at timestamptz` + a BEFORE UPDATE trigger on `cards` to
---      auto-bump it, mirroring incoming_shipments / grading_submissions.
+--   1. Rename variation -> card_type. This is the parallel (refractor, blue
+--      refractor, electric, ...). I pick it myself since the model can't tell
+--      a card's color. Renaming keeps the data that's already there. It can be
+--      empty since base cards don't have a parallel.
+--   2. Rename sport -> category. What the card is: basketball, football,
+--      soccer, golf, one piece, pokemon, etc. Still required. There's no brand
+--      column because the brand is already in set_name (Topps Chrome, Panini
+--      Prizm, ...).
+--   3. Add updated_at and a trigger that updates it on every change, same as
+--      incoming_shipments and grading_submissions.
 --
--- Both renames are mirrored on `demo_cards` so the public demo stays a faithful
--- structural mirror of `cards` (minus real inventory).
+-- Both renames happen on demo_cards too so it matches cards.
 --
--- Idempotent: each RENAME is guarded by a check that the old column still
--- exists, ADD COLUMN IF NOT EXISTS, CREATE OR REPLACE FUNCTION, DROP TRIGGER
--- IF EXISTS. Safe to re-run.
+-- Safe to run more than once.
 -- ============================================================
 
--- --- 1 + 2. Column renames on `cards` (guarded so re-runs are no-ops) ---
+-- --- 1 + 2. Rename the columns on cards (only if they haven't been already) ---
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -39,7 +32,7 @@ BEGIN
   END IF;
 END $$;
 
--- --- Same renames on `demo_cards` (mirror) ---
+-- --- Same renames on demo_cards ---
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM information_schema.columns
@@ -53,10 +46,10 @@ BEGIN
   END IF;
 END $$;
 
--- --- 3. updated_at + auto-bump trigger on cards ---
+-- --- 3. updated_at and the trigger that sets it ---
 ALTER TABLE cards ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
--- Reusable trigger function: stamp updated_at = now() on every UPDATE.
+-- Sets updated_at = now() every time a row changes. Other tables can use it too.
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS trigger AS $$
 BEGIN

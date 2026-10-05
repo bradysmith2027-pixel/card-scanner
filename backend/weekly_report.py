@@ -1,49 +1,44 @@
 """
-weekly_report.py — build the Weekly Ops report and email it.
+weekly_report.py
 
-WHY THIS EXISTS (2026-09-28)
-    `04 Dreamboat Slabs/[C] Reporting Procedure.md` specifies a weekly review
-    and the cadence never happened, because it depended on Brady remembering to
-    sit down and write one. A generated report that arrives on its own removes
-    the step that was failing. It also enforces the rule the procedure states:
-    every figure is computed from the database, never hand-assembled.
+Builds the Weekly Ops report and emails it.
 
-HOW IT AUTHENTICATES  — and why not the obvious way
-    NOT with the service_role key. The 2026-08-24 security work deliberately
-    kept that key off every host; `backup.py` uses it and runs only on Brady's
-    laptop for exactly that reason.
+I planned on doing a weekly review but it never happened, because I had to
+remember to sit down and write it. Now it just shows up in my inbox on its
+own, and every number comes from the database.
 
-    This job signs in as a dedicated REPORT account with password credentials
-    and uses the resulting user JWT, so PostgREST applies RLS as it would for
-    any user. The account needs a row in `viewer_grants` (migration 011) to see
-    the owner's cards — the same read-only mechanism built for the family
-    office. It can SELECT and nothing else: migration 011's policies are
-    SELECT-only, and Postgres ORs permissive policies per command, so writes
-    remain owner-only no matter what this job does.
+How it logs in:
+    It doesn't use the service_role key. That key only lives on my laptop
+    (backup.py uses it) and I want to keep it that way.
 
-WHERE IT RUNS
-    Railway cron. NOT GitHub Actions: `card-scanner` is a public repo and
-    Actions logs on public repos are world-readable, so a traceback containing
-    card rows would be published. Railway's logs are private to the account.
+    Instead it signs in as a separate report account with a password, so RLS
+    works like it would for any user. That account has a row in viewer_grants
+    (migration 011) so it can see my cards, the same read-only setup my dad's
+    account uses. It can only read. The policies in 011 only allow SELECT, so
+    it can't change anything.
 
-🔴 LOGGING RULE
-    This script prints counts, status and timings. It NEVER prints report
-    content or row data. Anything it logs should be safe on a screen share.
+Where it runs:
+    A Railway cron job. Not GitHub Actions, because card-scanner is a public
+    repo and anyone can read the Actions logs on a public repo. If it crashed,
+    my card data could end up in a public log. Railway's logs are private.
 
-ENV
+Logging:
+    Only prints counts, status and timing. Never the report or any card data.
+
+Env variables:
     SUPABASE_URL                project URL
-    SUPABASE_ANON_KEY           public anon key (safe; it is in the frontend bundle)
+    SUPABASE_ANON_KEY           public anon key (fine to share, it's in the frontend)
     REPORT_ACCOUNT_EMAIL        the read-only report account
     REPORT_ACCOUNT_PASSWORD     its password
-    REPORT_TO                   where the report is sent (comma-separated)
-    REPORT_CC / REPORT_BCC      optional, comma-separated
-    GMAIL_USER                  the sending Gmail account
-    GMAIL_APP_PASSWORD          a Google APP PASSWORD, not the account password
-    REPORT_FROM                 optional From override
+    REPORT_TO                   who gets the report (comma separated)
+    REPORT_CC / REPORT_BCC      optional, comma separated
+    GMAIL_USER                  the Gmail account it sends from
+    GMAIL_APP_PASSWORD          a Google app password, not the normal password
+    REPORT_FROM                 optional, to change the From address
 
-RUN
+Run:
     python weekly_report.py             # build and send
-    python weekly_report.py --dry-run   # build and print, send nothing
+    python weekly_report.py --dry-run   # build and print, don't send
 """
 
 from __future__ import annotations
@@ -66,11 +61,10 @@ ENV_FILE = HERE / ".env"
 
 
 def load_env() -> dict:
-    """Environment first, .env file as a fallback.
+    """Check the environment first, then the .env file.
 
-    Railway injects real environment variables; the .env file is the local
-    convenience. Environment wins so a deployed run can never be silently
-    overridden by a stale committed-adjacent file.
+    Railway sets real environment variables and .env is just for my laptop.
+    The environment wins so an old .env file can't override what's on Railway.
     """
     env: dict[str, str] = {}
     if ENV_FILE.exists():
@@ -84,7 +78,7 @@ def load_env() -> dict:
 
 
 def sign_in(url: str, anon_key: str, email: str, password: str) -> str:
-    """Exchange password credentials for a user JWT."""
+    """Log in with the email and password and get back a token."""
     req = urllib.request.Request(
         f"{url}/auth/v1/token?grant_type=password",
         data=json.dumps({"email": email, "password": password}).encode(),
@@ -121,9 +115,8 @@ def main() -> None:
 
     required = ["SUPABASE_URL", "SUPABASE_ANON_KEY", "REPORT_ACCOUNT_EMAIL",
                 "REPORT_ACCOUNT_PASSWORD"]
-    # Transport is chosen by which key is present, so the laptop keeps using
-    # Gmail SMTP untouched while Railway uses Brevo. Railway blocks outbound
-    # SMTP in the runtime container below Pro; HTTPS works in both places.
+    # Picks how to send based on which key is set. My laptop uses Gmail SMTP
+    # and Railway uses Brevo, since Railway blocks SMTP unless you're on Pro.
     use_brevo = bool(env.get("BREVO_API_KEY"))
     if not (dry_run or preview):
         required += ["REPORT_TO"]
@@ -131,8 +124,8 @@ def main() -> None:
             "GMAIL_USER", "GMAIL_APP_PASSWORD"]
     missing = [k for k in required if not env.get(k)]
     if missing:
-        # Names only. Never echo a value — printing a secret to prove it is set
-        # is exactly how two keys leaked on 2026-09-06.
+        # Only print the names. Never print the values, that's how I leaked two
+        # API keys once.
         raise SystemExit(f"Missing env vars: {', '.join(missing)}")
 
     url = env["SUPABASE_URL"].rstrip("/")
@@ -147,8 +140,8 @@ def main() -> None:
         submissions.setdefault(str(row.get("card_id")), []).append(row)
 
     if not cards:
-        # An empty result from a read-only account almost always means the
-        # viewer_grants row is missing, not that the inventory is empty.
+        # If the read-only account gets nothing back, it's almost always because
+        # the viewer_grants row is missing, not because there are no cards.
         print("WARNING: zero cards visible. Check the viewer_grants row for "
               "this account before trusting an empty report.")
 
@@ -163,8 +156,8 @@ def main() -> None:
     )
 
     if preview:
-        # Written outside the repo: this file contains real inventory and
-        # margins, and the repo is public.
+        # Saved outside the repo since it has my real inventory and margins in
+        # it, and the repo is public.
         out = Path(os.environ.get("TEMP", ".")) / "dreamboat-weekly-preview.html"
         out.write_text(html, encoding="utf-8")
         print(f"preview written: {out}")
@@ -178,10 +171,9 @@ def main() -> None:
     cc = mailer._addresses(env.get("REPORT_CC"))
     bcc = mailer._addresses(env.get("REPORT_BCC"))
     if use_brevo:
-        # The From address must be VERIFIED IN BREVO under Senders, or the API
-        # returns 400 sender_not_valid. Verification is per-address, not
-        # per-domain — which is the whole reason Brevo works here and Resend
-        # does not, with both domains still on clientHold.
+        # The From address has to be verified in Brevo under Senders or it
+        # returns 400 sender_not_valid. Brevo verifies single addresses, which
+        # is why it works and Resend doesn't while my domains are on hold.
         sender = env.get("REPORT_FROM") or (
             f"Dreamboat Slabs <{env['GMAIL_USER']}>" if env.get("GMAIL_USER")
             else ""
@@ -209,7 +201,7 @@ def main() -> None:
             html=html,
         )
 
-    # Counts only — never content, and never the addresses themselves.
+    # Just counts. Never the content or the email addresses.
     print(
         f"sent id={message_id} to={len(recipients)} "
         f"cc={len(cc)} bcc={len(bcc)} "

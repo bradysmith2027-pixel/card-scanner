@@ -1,14 +1,16 @@
 """
-scan.py — POST /scan: identify a card from photo(s).
+scan.py
 
-Security posture (per the schema design doc — this is the cost-abuse surface):
-  - Auth required (current_user).
-  - Per-user rate limit: 10/min (slowapi) — matches "scan front then back, one
-    card at a time" and catches a runaway loop fast.
-  - File validation BEFORE any model/GPT-4o work: content-type must be an image,
-    size capped, and the bytes must actually decode as an image.
-  - Returns identified fields only — does NOT persist. Saving happens after the
-    user confirms on the (frontend) confirmation screen.
+POST /scan reads a card from a photo (or front and back photos).
+
+Every scan costs money (GPT-4o), so:
+  - You have to be logged in.
+  - 10 scans a minute per user. That's plenty for scanning front then back one
+    card at a time, and it stops anything from looping.
+  - The files get checked before anything else runs: has to be an image, can't
+    be too big, and it has to actually open as an image.
+  - It only sends back what it read. Nothing gets saved until I confirm the
+    card on the confirmation screen.
 """
 
 from typing import Optional
@@ -75,17 +77,17 @@ async def scan_card(
         back_bytes = await _read_valid_image(back, "back")
 
     try:
-        # Blocking (model + GPT-4o) — run off the event loop.
+        # This part is slow (model + GPT-4o), so run it in a thread.
         result = await run_in_threadpool(
             run_scan, front_bytes, back_bytes, capture_mode, card_type
         )
     except ScanError as e:
-        # User-actionable: bad card type, undecodable image, no detections.
+        # Stuff the user can fix: wrong card type, bad image, nothing found.
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except ScanUnavailable as e:
-        # Lightweight deployment without the vision deps: the rest of the API
-        # works, scanning does not. Distinct from a transient 502 so the
-        # frontend can say "scan locally" rather than "try again".
+        # The server is running without the vision stuff installed. Everything
+        # else works, just not scanning. This is a 503 instead of a 502 so the
+        # frontend can say scanning isn't available instead of "try again".
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e)
         )

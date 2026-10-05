@@ -1,48 +1,35 @@
 """
-lot_basis.py — split one lot price across the cards inside it. Pure math.
+lot_basis.py
 
-WHY THIS MODULE EXISTS (2026-09-14)
-    One payment, many cards. A Discord lot, a collection buy, a repack. The
-    receipt says $200; the box has 50 cards. Every card needs a cost basis,
-    and the app previously had no way to produce one — verified 2026-09-14,
-    there was no `purchase_lots` table and no `lot_id` anywhere in the backend.
+Splits the price of a lot across the cards in it.
 
-    This is the highest-stakes gap in the whole system, because of what
-    Brady's own sales history says:
+When I buy a lot (Discord lot, a collection, a repack) I pay one price for a
+bunch of cards. Say $200 for 50 cards. Every card still needs its own cost so
+profit works when I sell it.
 
-        Cash sales >= $300 (single cards, bought near comp):
-            7 cards, $4,048 cost, $232 net  ->   5.7% ROI
-        Sub-$300 (Discord LOTS at ~$1.27/card):
-            28 cards, $1,294 cost, $504 net ->  39% ROI
+My lots have been my best ROI by far (around 39% vs about 6% on single cards
+I buy near comps), so I want these costs to actually be right.
 
-    His most profitable channel by a factor of seven is the one the system
-    cannot record. Deploying capital into lots without this means every buy in
-    the best lane enters with a guessed basis, and the T1 gates (>=60%
-    sell-through, >=20% net margin) measure fiction.
+The bulk remainder:
+    I'm not going to type in 46 commons. I enter the 4 cards that matter and
+    the rest go in a box. If the whole $200 got split across just those 4,
+    each one would carry about $50 of cost it never really had, and the lot
+    would look like a loss when it wasn't.
 
-THE BULK REMAINDER — the trap that makes naive lot entry worse than useless
-    Nobody types in 46 commons. Brady buys a 50-card lot, enters the 4 cards
-    worth entering, and the rest goes in a box. If the allocator spreads the
-    full $200 across only those 4, each hit absorbs ~$50 of basis it never
-    cost — and the lot looks like a loser when it was fine.
-
-    So a lot carries `bulk_remainder_value`: the estimated total value of the
-    cards NOT entered individually. It joins the denominator, absorbs its
-    proportional share, and that share is recorded on the lot as bulk basis.
+    So a lot has a bulk_remainder_value, which is my guess at what all the
+    cards I didn't enter are worth together. It gets its share of the cost
+    like any other card:
 
         entered card  ->  lot_all_in * est_value / (sum(est_values) + bulk)
         bulk          ->  lot_all_in * bulk      / (sum(est_values) + bulk)
 
-    The books still balance to the penny, and the entered cards carry only
-    what they actually cost.
+    Everything still adds up to the cent, and the cards I entered only carry
+    what they really cost.
 
-WHAT "lot_all_in" MEANS
-    The price of the lot PLUS what it cost to get it: shipping in, tax, and
-    any other costs. Same definition of cost as profit.all_in_cost uses for a
-    single card — there is one idea of cost in this system, not two.
+lot_all_in means the lot price plus shipping, tax and any other costs. Same
+idea as all_in_cost in profit.py for a single card.
 
-PURE BY DESIGN
-    No database. Same contract as profit.py and trade_basis.py.
+No database stuff in here, same as profit.py and trade_basis.py.
 """
 
 from __future__ import annotations
@@ -55,12 +42,12 @@ from app.allocation import largest_remainder
 
 _CENTS = Decimal("0.01")
 
-#: Lot-level cost inputs, mirroring the card-level names in profit.COST_FIELDS.
+# The lot's cost fields. Same idea as COST_FIELDS in profit.py.
 LOT_COST_FIELDS = ("total_cost", "shipping_in", "purchase_tax", "other_costs")
 
 
 class LotBasisError(ValueError):
-    """Raised when a lot cannot be allocated."""
+    """Error for when a lot can't be split up."""
 
 
 def _money(value: Any) -> Decimal:
@@ -76,10 +63,10 @@ def _money(value: Any) -> Decimal:
 
 @dataclass(frozen=True)
 class LotCard:
-    """A card being entered individually from the lot.
+    """A card from the lot that I'm entering on its own.
 
-    `est_value` is an ALLOCATION WEIGHT — what this card is roughly worth
-    relative to the others. It is never a price and never feeds profit.
+    est_value is just how much the card is worth compared to the others, so
+    the cost can be split. It's not a price and doesn't go into profit.
     """
 
     ref: str
@@ -103,7 +90,7 @@ class LotBasisResult:
 
 
 def lot_all_in_cost(lot: Any) -> Decimal:
-    """What the lot actually cost: price + shipping + tax + other."""
+    """What the lot really cost: price + shipping + tax + other."""
     get = lot.get if hasattr(lot, "get") else lambda k, d=None: getattr(lot, k, d)
     return sum((_money(get(f)) for f in LOT_COST_FIELDS), Decimal(0)).quantize(
         _CENTS, rounding=ROUND_HALF_UP
@@ -115,11 +102,11 @@ def allocate_lot_basis(
     cards: Sequence[LotCard],
     bulk_remainder_value: Any = 0,
 ) -> LotBasisResult:
-    """Spread a lot's all-in cost across its cards, pro-rata by value.
+    """Split a lot's total cost across its cards based on what each is worth.
 
-    `bulk_remainder_value` is the estimated total value of cards NOT entered
-    individually. Its share of the cost is returned as `bulk_basis` rather
-    than being forced onto the entered cards.
+    bulk_remainder_value is roughly what all the cards I didn't enter are worth.
+    Their share of the cost comes back as bulk_basis so it doesn't get pushed
+    onto the cards I did enter.
     """
     if not cards:
         raise LotBasisError(
@@ -138,9 +125,9 @@ def allocate_lot_basis(
 
     even_split_fallback = weight_total <= 0
     if even_split_fallback:
-        # No values at all. Fall back to an even split across entered cards
-        # and IGNORE the bulk remainder — with no values there is nothing to
-        # weigh it against, and inventing a ratio would be worse than saying so.
+        # No values entered at all, so split it evenly across the entered
+        # cards and ignore the bulk remainder. With no values there's nothing
+        # to compare the bulk against.
         weights = [Decimal(1)] * len(cards)
         weight_total = Decimal(len(cards))
         bulk = Decimal(0)
@@ -152,9 +139,8 @@ def allocate_lot_basis(
 
     denominator = weight_total + bulk
 
-    # Allocate cards and bulk together so the pennies reconcile across ALL
-    # shares, not just the card ones — otherwise the leftover cent lands in
-    # bulk every time and the lot slowly drifts out of balance.
+    # Split the cards and the bulk together so the leftover pennies get handed
+    # out fairly. Otherwise the extra cent would always end up on the bulk.
     refs = [c.ref for c in cards]
     if bulk > 0:
         shares = largest_remainder(total, weights + [bulk], refs + ["__bulk__"])

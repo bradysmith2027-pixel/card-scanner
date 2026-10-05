@@ -1,4 +1,4 @@
-"""test_export.py — offline auth-gate tests for GET /export/csv."""
+"""test_export.py: checks that GET /export/csv needs a login. Runs offline."""
 
 import pytest
 from fastapi.testclient import TestClient

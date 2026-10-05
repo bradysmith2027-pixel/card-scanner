@@ -1,9 +1,11 @@
 """
-cards.py — inventory endpoints backed by the `cards` table.
+cards.py
 
-Every query goes through user_client(token), so Supabase RLS scopes results to
-the logged-in user automatically. The backend never relies on a WHERE clause
-alone for isolation — the database is the backstop (see the schema design doc).
+The inventory endpoints for the cards table.
+
+Every query goes through user_client(token), so RLS only lets each user see
+their own cards. I don't just rely on a WHERE clause for that, the database
+handles it.
 """
 
 import logging
@@ -22,44 +24,36 @@ router = APIRouter(prefix="/cards", tags=["cards"])
 
 log = logging.getLogger(__name__)
 
-# Money must be non-negative and within sane bounds (server-side validation,
-# per the schema design doc's security requirements). Bad values -> 422.
+# Money can't be negative or crazy high. Bad values get a 422.
 Money = Annotated[Decimal, Field(ge=0, le=10_000_000)]
 
-# These mirror the CHECK constraints added in migration 007. Declaring them as
-# Literals means a bad value fails as a clean 422 at the API boundary instead of
-# reaching Postgres and coming back as an opaque 23514 — which is exactly how
-# the 2026-08-18 outage happened (a free-text field against a constrained
-# column). Keep these in sync with the migration; all values are lowercase.
+# The allowed values below match the CHECK constraints from migration 007. If
+# something bad gets sent, it fails here with a clear 422 instead of a confusing
+# Postgres error (23514). That's what broke saving cards back in August. Keep
+# these matching the migration, and keep them lowercase.
 def _blank_to_none(value):
-    """Trim a string field, and turn an empty result into None.
+    """Trim a text field and turn it into None if it ends up empty.
 
-    This exists for migration 010's `serial` CHECK, which rejects both '' and
-    values with surrounding whitespace. An empty text input in the browser
-    posts "", not null — so without this, leaving the (usually blank) serial
-    box alone would fail as an opaque Postgres 23514, which is precisely the
-    shape of the 2026-08-18 outage.
+    The serial column (migration 010) doesn't allow '' or extra spaces. An empty
+    box in the browser sends "" instead of null, so without this, leaving the
+    serial blank would make the save fail.
 
-    Normalizing rather than 422-ing is deliberate: blank means "this card is
-    not numbered", which is the common case and a legitimate answer, not a
-    validation error. On PATCH it doubles as the way to CLEAR a serial that
-    was entered wrongly.
+    Blank just means the card isn't numbered, which is normal, so it shouldn't
+    be an error. On PATCH this is also how you clear a serial you typed wrong.
     """
     if isinstance(value, str):
         return value.strip() or None
     return value
 
 
-# Serial / print run as printed ("9/25", "1/1", "FOTL 12/99"). Mirrors the
-# CHECK in migration 010 so an over-long value fails as a clean 422 here
-# instead of a 23514 from Postgres. Deliberately free text — see the migration
-# for why this is not two integers.
+# The serial / print run exactly how it's printed ("9/25", "1/1", "FOTL 12/99").
+# Same length limit as migration 010, so a value that's too long gets a 422
+# here. It's text and not two numbers because a lot of serials don't fit that
+# (see the migration).
 #
-# ⚠️ `max_length` is on the INNER str, not on the Optional. Written as
-# `Annotated[Optional[str], Field(max_length=32)]` pydantic applies the length
-# check to the whole union and raises TypeError on None — so clearing a serial
-# (the "" -> None path below) would 500 instead of writing NULL. Caught by
-# test_clearing_a_serial_is_expressible_on_patch; keep that test.
+# Note: max_length has to go on the inner str, not the Optional. If it's on the
+# Optional, pydantic errors on None, and clearing a serial would crash with a
+# 500. test_clearing_a_serial_is_expressible_on_patch checks this.
 Serial = Annotated[
     Optional[Annotated[str, Field(max_length=32)]],
     BeforeValidator(_blank_to_none),
@@ -71,12 +65,11 @@ SaleChannel = Literal["discord", "facebook", "instagram", "ebay", "show", "other
 
 
 class Card(BaseModel):
-    """Shape of a row in the `cards` table (mirrors the columns as built),
-    plus the profit fields computed server-side by `app.profit`.
+    """A row from the cards table, plus the profit numbers from app.profit.
 
-    The computed block at the bottom is NOT stored. It is derived on read so
-    that exactly one implementation of the profit math exists — the frontend
-    renders these values and does no arithmetic of its own.
+    The fields at the bottom aren't saved in the database. They get calculated
+    every time cards are loaded so the profit math only exists in one place.
+    The frontend just shows them.
     """
 
     id: str
@@ -85,7 +78,7 @@ class Card(BaseModel):
     year: str
     set_name: str
     card_number: Optional[str] = None
-    # --- migration 010: the print run, as printed. NULL = not numbered. ---
+    # --- migration 010: the print run as printed. None = not numbered ---
     serial: Optional[str] = None
     category: Optional[str] = None
     card_type: Optional[str] = None
@@ -101,41 +94,41 @@ class Card(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
-    # --- migration 007: cost inputs (buy side) ---
+    # --- migration 007: costs when buying ---
     shipping_in: Optional[Decimal] = None
     purchase_tax: Optional[Decimal] = None
     other_costs: Optional[Decimal] = None
 
-    # --- migration 007: sell side. shipping_collected is REVENUE. ---
+    # --- migration 007: selling. shipping_collected counts as money in ---
     shipping_out: Optional[Decimal] = None
     platform_fees: Optional[Decimal] = None
     shipping_collected: Optional[Decimal] = None
     sale_channel: Optional[str] = None
     buyer_name: Optional[str] = None
 
-    # --- migration 007: strategy + reporting dimensions ---
+    # --- migration 007: strategy and reporting fields ---
     position_type: Optional[str] = None
     lane: Optional[str] = None
     est_market_value: Optional[Decimal] = None
     hold_thesis: Optional[str] = None
 
-    # --- computed by app.profit, never stored ---
+    # --- calculated by app.profit, not saved ---
     grading_cost: Optional[Decimal] = None
     all_in_cost: Optional[Decimal] = None
     net_proceeds: Optional[Decimal] = None
-    # None (not 0) until sold — 0 would average into ROI and drag it down.
+    # None until sold, not 0. A 0 would get averaged into ROI and pull it down.
     net_profit: Optional[Decimal] = None
     roi: Optional[Decimal] = None
     hold_days: Optional[int] = None
 
 
 class CardCreate(BaseModel):
-    """Payload for manually entering a card. `user_id` is NOT accepted from the
-    client — it's set server-side from the verified token, so a caller can't
-    create rows owned by someone else (RLS's WITH CHECK would reject it anyway).
+    """What gets sent when I add a card by hand. user_id isn't taken from the
+    request. It comes from the token, so nobody can make a card under someone
+    else's account (RLS would block that anyway).
     """
 
-    # Required (NON-NULL in the table).
+    # Required (can't be empty in the table).
     player: str = Field(min_length=1)
     year: str = Field(min_length=1)
     set_name: str = Field(min_length=1)
@@ -143,15 +136,14 @@ class CardCreate(BaseModel):
 
     # Optional.
     card_number: Optional[str] = None
-    # ⚠️ NOT the card number. This is the stamped print run ("9/25" = card 9 of
-    # 25 made). Leave it null for an unnumbered card — that is the common case
-    # and a real answer, not missing data. See migration 010.
+    # This is NOT the card number. It's the print run stamped on the card
+    # ("9/25" means card 9 of 25). Leave it empty if the card isn't numbered,
+    # which is most of them.
     serial: Serial = None
     card_type: Optional[str] = None  # finish/parallel: refractor, blue refractor, ... (user-picked)
-    # ⚠️ CARD PRICE ONLY — shipping and tax are separate fields below. This
-    # differs from the spreadsheet-era convention where purchase_price was
-    # all-in. Entering an all-in number here double-counts and silently
-    # overstates cost basis. The entry form must label this clearly.
+    # Just the price of the card. Shipping and tax have their own fields below.
+    # In my old spreadsheet this was the all-in number, so if I put the all-in
+    # here it would count shipping and tax twice. The form labels this.
     purchase_price: Optional[Money] = None
     purchase_date: Optional[date] = None
     sale_price: Optional[Money] = None
@@ -175,8 +167,8 @@ class CardCreate(BaseModel):
     hold_thesis: Optional[str] = None
     lane: Optional[Lane] = None
 
-    # 🔒 Settable ONLY at creation. It is deliberately absent from CardUpdate,
-    # so this is the one and only moment a card's bucket is decided.
+    # Can only be set when the card is created. It's left out of CardUpdate on
+    # purpose so flip vs hold gets decided once, when I buy it.
     position_type: PositionType = "flip"
 
 
@@ -186,8 +178,8 @@ def create_card(
     user: AuthedUser = Depends(current_user),
 ) -> dict:
     """
-    Create a card for the current user. Ownership is stamped from the verified
-    token, and RLS's WITH CHECK enforces user_id = auth.uid() as the backstop.
+    Add a card for the logged in user. The owner comes from the token, and RLS
+    double checks that user_id = auth.uid().
     """
     row = payload.model_dump(mode="json", exclude_none=True)
     row["user_id"] = user.id
@@ -196,9 +188,8 @@ def create_card(
     try:
         resp = client.table("cards").insert(row).execute()
     except Exception:
-        # Log the real cause server-side (constraint violation, RLS rejection,
-        # unknown column, ...) but keep the client message generic — DB detail
-        # must not leak to the browser. Without this the 502 is undebuggable.
+        # Log the actual error so I can debug it, but only send a plain message
+        # back to the browser so no database details get out.
         log.exception("Card insert failed. Payload keys: %s", sorted(row))
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -215,34 +206,25 @@ def create_card(
 
 
 class CardUpdate(BaseModel):
-    """Partial update payload.
+    """What gets sent when I edit a card.
 
-    Every field is optional; only the keys actually present in the request body
-    are written (see `exclude_unset` in `update_card`). Sending `{}` is rejected
-    rather than silently doing nothing.
+    Every field is optional and only the fields actually sent get changed (see
+    exclude_unset in update_card). Sending {} gets rejected.
 
-    Deliberately NOT updatable: `id`, `user_id`, `created_at`, `updated_at`.
-    Ownership must never be reassignable from the client — RLS's WITH CHECK
-    would reject it anyway, but the field is omitted so the attempt can't even
-    be expressed.
+    id, user_id, created_at and updated_at can't be changed. They're just not
+    in this model, so there's no way to even try to change who owns a card.
 
-    🔒 ALSO NOT UPDATABLE: `position_type`.
+    position_type can't be changed either.
 
-    The business rule is that a card enters the hold bucket AT PURCHASE and is
-    never reclassified. A flip that did not sell is a LOSS, not a collection
-    piece.
+    My rule is that a card is a flip or a hold from the day I buy it. If a flip
+    doesn't sell, that's a loss. It doesn't get to become part of my
+    collection. If I could switch it, it would be way too easy to move bad
+    flips into the collection, and then my ROI would look better than it
+    really is while money sits in cards nobody wants.
 
-    This is enforced structurally rather than by policy because the failure
-    mode needs no bad intent: with flips and holds funded from the same
-    capital, "personal collection" is the perfect place to park a failed flip.
-    Reclassify one and the position leaves the performance report, ROI looks
-    clean, and the monthly review shows profit while capital sits frozen in
-    cards nobody wanted.
-
-    Since `update_card` uses `exclude_unset`, ANY field present on this model
-    is patchable — so omission is the enforcement. Do not add position_type
-    here. If a card was genuinely mislabelled at creation, fix it in the
-    database directly and note why.
+    Any field in this model can be edited, so leaving it out is what blocks
+    it. Don't add position_type here. If I really labeled a card wrong when I
+    added it, I'll fix it in the database directly.
     """
 
     player: Optional[str] = Field(default=None, min_length=1)
@@ -250,8 +232,7 @@ class CardUpdate(BaseModel):
     set_name: Optional[str] = Field(default=None, min_length=1)
     category: Optional[str] = Field(default=None, min_length=1)
     card_number: Optional[str] = None
-    # Patchable, unlike position_type: a misread serial is a data-entry error
-    # with no incentive attached, and correcting it makes the record MORE true.
+    # This one can be edited. A serial that got read wrong is just a typo.
     # Sending "" clears it (see _blank_to_none).
     serial: Serial = None
     card_type: Optional[str] = None
@@ -261,15 +242,15 @@ class CardUpdate(BaseModel):
     sale_date: Optional[date] = None
     status: Optional[str] = None
     ebay_comp_url: Optional[str] = None
-    # Storage PATH inside the private `card-images` bucket, not a public URL —
-    # e.g. "{user_id}/{card_id}/front.jpg". The bucket is private, so the client
-    # mints a short-lived signed URL at render time. Storing a signed URL here
-    # would be wrong: it expires, and the row would rot.
+    # This is a path in the private card-images bucket, not a link. Something
+    # like "{user_id}/{card_id}/front.jpg". The frontend makes a temporary
+    # signed link when it shows the image. Saving a signed link here wouldn't
+    # work since they expire.
     image_url: Optional[str] = None
     notes: Optional[str] = None
     acquisition_source: Optional[str] = None
 
-    # --- migration 007 (position_type intentionally absent, see docstring) ---
+    # --- migration 007 (no position_type on purpose, see above) ---
     shipping_in: Optional[Money] = None
     purchase_tax: Optional[Money] = None
     other_costs: Optional[Money] = None
@@ -290,11 +271,10 @@ def update_card(
     user: AuthedUser = Depends(current_user),
 ) -> dict:
     """
-    Partially update one of the current user's cards.
+    Edit one of the logged in user's cards.
 
-    RLS is the isolation boundary: the UPDATE simply cannot match a row owned by
-    someone else, so a wrong/guessed `card_id` returns 404 rather than touching
-    another user's data. `updated_at` is maintained by the DB trigger.
+    RLS means the update can't touch anyone else's card, so a wrong card_id
+    just comes back as a 404. updated_at gets set by a trigger in the database.
     """
     changes = payload.model_dump(mode="json", exclude_unset=True)
     if not changes:
@@ -307,9 +287,7 @@ def update_card(
     try:
         resp = client.table("cards").update(changes).eq("id", card_id).execute()
     except Exception:
-        # Same reasoning as create_card: log the real cause (CHECK violation,
-        # RLS rejection, bad column) server-side, keep the client message
-        # generic so no DB detail leaks.
+        # Same as create_card. Log the real error, send back a plain message.
         log.exception(
             "Card update failed (card_id=%r). Changed keys: %s",
             card_id,
@@ -321,9 +299,8 @@ def update_card(
         )
 
     if not resp.data:
-        # Either no such card, or it belongs to someone else. Both are 404 on
-        # purpose — distinguishing them would confirm the existence of another
-        # user's row.
+        # Either the card doesn't exist or it's someone else's. Both are a 404 so
+        # nobody can tell if another user's card exists.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Card not found.",
@@ -344,8 +321,8 @@ def list_cards(
     ),
 ) -> list[dict]:
     """
-    List the current user's cards, newest first. RLS guarantees only this
-    user's rows come back regardless of the query.
+    Get the logged in user's cards, newest first. RLS makes sure only their
+    cards come back.
     """
     client = user_client(user.token)
     query = client.table("cards").select("*").order("created_at", desc=True)
@@ -355,10 +332,8 @@ def list_cards(
     try:
         resp = query.execute()
     except Exception:
-        # Log the real cause server-side, return a generic message to the
-        # client (no internal/DB detail leaked). Without the log this branch is
-        # undebuggable in production — the same gap create_card had until
-        # 2026-08-18, which is what made the 23514 constraint bug a mystery.
+        # Log the real error and send back a plain message. Without the log I'd
+        # have no idea what went wrong in production.
         log.exception("GET /cards failed (status_filter=%r)", status_filter)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -370,17 +345,14 @@ def list_cards(
 
 
 def grading_costs_by_card(client, rows: list[dict]) -> dict[str, list[dict]]:
-    """Fetch grading submissions for these cards in ONE query, keyed by card_id.
+    """Get the grading submissions for these cards in one query, by card_id.
 
-    This is the join that was missing from every profit number in the app:
-    `grading_submissions.cost` has existed since the initial schema and was
-    never included anywhere. For a raw-to-grade card it is often the second
-    largest cost after the card itself.
+    Grading cost wasn't part of profit before this. For a card I buy raw and
+    send in, it's usually the biggest cost after the card itself.
 
-    Failure here is deliberately NON-FATAL. If the grading table can't be read,
-    every card still returns with grading_cost = 0 rather than the whole
-    inventory 502-ing. The profit numbers would be slightly optimistic, which
-    is bad — so it is logged loudly — but an unreadable inventory is worse.
+    If this fails it doesn't break anything. The cards still load with
+    grading_cost = 0. The profit would be a little high, so it gets logged, but
+    that's better than the whole inventory not loading.
     """
     ids = [str(r["id"]) for r in rows if r.get("id")]
     if not ids:
@@ -408,33 +380,27 @@ def grading_costs_by_card(client, rows: list[dict]) -> dict[str, list[dict]]:
 
 
 class CardClose(BaseModel):
-    """Close-out payload: recording a sale that already happened elsewhere.
+    """What gets sent when I mark a card as sold.
 
-    ⚠️ This app is NOT a storefront. Brady sells on eBay/Whatnot/Discord and
-    handles that himself. This endpoint is ~30 seconds of data entry after the
-    fact, nothing more.
+    The app isn't where I sell. I sell on eBay, Whatnot, Discord, etc. This is
+    just logging the sale after it happens.
 
-    WHY FEES ARE REQUIRED AND NOT OPTIONAL
-        Fees not captured at the moment of close-out are never captured. Nobody
-        reconstructs an eBay cut from three weeks ago. An optional field here
-        would be left blank, migration 007's cost columns would sit empty
-        forever, and every profit number would quietly revert to being gross.
+    Fees are required. If I don't enter them right when I log the sale, I'm
+    never going to go back and look up an eBay fee from three weeks ago, and
+    all my profit numbers would be too high again.
 
-        So `platform_fees` and `shipping_out` have no defaults — omitting them
-        is a 422. Selling somewhere with no fees (Discord, cash at a show) is
-        expressed by explicitly sending 0, which is a statement rather than an
-        omission.
+    So platform_fees and shipping_out don't have defaults, and leaving them out
+    is a 422. If there weren't any fees (Discord, cash at a show), I send 0.
 
-    WHY A DEDICATED ENDPOINT INSTEAD OF PATCH
-        PATCH uses `exclude_unset` and cannot require anything. Only a separate
-        model can make fees mandatory — which is the entire point.
+    This is its own endpoint instead of using PATCH because PATCH can't make
+    anything required.
     """
 
     sale_price: Money
     sale_date: date
     platform_fees: Money
     shipping_out: Money
-    # Revenue: what the buyer paid for shipping on top of the card price.
+    # What the buyer paid me for shipping. Counts as money in.
     shipping_collected: Money = Decimal(0)
     sale_channel: Optional[SaleChannel] = None
     buyer_name: Optional[str] = None
@@ -447,13 +413,13 @@ def close_card(
     user: AuthedUser = Depends(current_user),
 ) -> dict:
     """
-    Close out a card: record the sale and flip status to 'sold'.
+    Mark a card as sold and save the sale details.
 
-    This is what makes the P&L real. Until a card can be closed it never leaves
-    `in_hand`, so the dashboard has no inputs and time-in-hand never stops.
+    This is what feeds the P&L page. Without it a card would sit in_hand
+    forever.
 
-    Sets `est_market_value` to NULL on close (Brady's convention): once there is
-    a real sale price, a stale estimate beside it is just noise.
+    It also clears est_market_value. Once I have the real sale price, the old
+    estimate doesn't matter.
     """
     changes = payload.model_dump(mode="json")
     changes["status"] = "sold"
@@ -470,8 +436,7 @@ def close_card(
         )
 
     if not resp.data:
-        # No such card, or someone else's. Both 404 — distinguishing them would
-        # confirm another user's row exists.
+        # Card doesn't exist or isn't theirs. Both are a 404 on purpose.
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Card not found.",

@@ -1,46 +1,44 @@
 """
-backup.py — full snapshot of the Dreamboat Slabs database.
+backup.py
 
-WHY THIS EXISTS (2026-09-17)
-    Until today the only copy of 14 months of financial history lived in one
-    Supabase project. `pg_dump` had been on the backlog since July and never
-    happened. On 2026-09-16 the database was wiped to a clean slate, and on
-    9/17 fifty-two rows were deleted — both intentional, both recoverable only
-    because a snapshot happened to be taken by hand first. That is luck, not a
-    process.
+Saves a full copy of the Dreamboat Slabs database.
 
-    One bad migration, one DELETE without a WHERE, or one lapsed free-tier
-    project and the entire cost basis of a ~$50k inventory is gone. Every other
-    problem on this project is fixable. This one isn't.
+Before this, the only copy of all my sales history was in Supabase. I'd been
+meaning to set up backups since July and never did. Then I cleared out the
+database on purpose twice in two days, and both times I only got the data back
+because I happened to save a copy by hand first. That was luck.
 
-WHAT IT WRITES
+One bad migration, one DELETE without a WHERE, or my free Supabase project
+getting paused, and I'd lose the cost of every card in my inventory. Most
+problems on this project can be fixed. That one couldn't.
+
+What it saves:
     backups/dreamboat-YYYY-MM-DD-HHMM.json   every row of every table
-    backups/cards-YYYY-MM-DD-HHMM.csv        cards only, openable in Excel
+    backups/cards-YYYY-MM-DD-HHMM.csv        just the cards, opens in Excel
 
-    The CSV is deliberate redundancy. If the app, the API, or Python is the
-    thing that's broken, a JSON blob is not much comfort — the CSV opens in
-    Excel and in Google Sheets, which is where this business ran before and
-    where it could run again in an emergency.
+The CSV is a backup for the backup. If the app or Python is what's broken, a
+JSON file doesn't help much, but a CSV opens in Excel or Google Sheets, which
+is how I ran the business before.
 
-    Files land in the VAULT, which OneDrive syncs, so the backup is off the
-    machine and off Supabase. The folder is gitignored: these rows contain
-    purchase prices, margins and counterparty names, and the repo is public.
+The files go in my vault, which OneDrive syncs, so they're off my laptop and
+off Supabase. The folder is in .gitignore because it has my prices, margins and
+buyer names, and the repo is public.
 
-IMAGES
-    Card photos are downloaded too, into backups/images/, mirroring the storage
-    path. `cards.image_url` holds a PATH into a PRIVATE bucket, not a URL, so
-    the bytes have to be fetched deliberately — backing up the rows alone would
-    restore an inventory of broken image links. Existing files are skipped, so
-    a nightly run costs one request per NEW card, not per card.
+Images:
+    Card photos get downloaded to backups/images/, in the same folders as in
+    storage. image_url is a path into a private bucket, not a link, so the
+    images have to be downloaded on purpose. Otherwise a restore would just
+    have broken image links. Images that are already saved get skipped, so
+    each night only downloads new ones.
 
-WHAT IT DOES NOT COVER
-    - auth.users. Accounts are re-creatable; a restore would need user_ids
-      remapped. The owner's user_id is recorded in the manifest for that reason.
-    - Schema. The migrations/ folder is the schema backup and is in git.
+What it doesn't back up:
+    - auth.users. Accounts can be made again, but a restore would need the
+      user ids swapped. My user id is saved in the manifest for that.
+    - The schema. That's what the migrations/ folder is, and it's in git.
 
-RUN
-    python backup.py              # write a snapshot
-    python backup.py --verify     # write, then re-read and check the row counts
+Run:
+    python backup.py              # save a backup
+    python backup.py --verify     # save, then read it back and check the row counts
 """
 
 from __future__ import annotations
@@ -56,10 +54,10 @@ from pathlib import Path
 HERE = Path(__file__).parent
 ENV = HERE / ".env"
 OUT = HERE.parent / "backups"
-KEEP = 30  # snapshots retained; daily runs => about a month of history
+KEEP = 30  # how many backups to keep, so about a month if it runs every day
 
-# Every table that holds user data. `demo_cards` is fixture data and is
-# included anyway because it is cheap and its absence would be confusing.
+# Every table with data in it. demo_cards is just sample data but it's small,
+# and it'd be confusing if it was missing.
 TABLES = [
     "cards",
     "trades",
@@ -71,7 +69,7 @@ TABLES = [
     "demo_cards",
 ]
 
-# Columns for the emergency CSV, in an order a human would want them.
+# Columns for the CSV, in an order that's easy to read.
 CSV_COLS = [
     "player", "year", "set_name", "card_number", "serial", "card_type",
     "category", "status", "position_type", "purchase_date", "purchase_price",
@@ -93,13 +91,12 @@ def load_env() -> dict:
 
 
 def fetch(url: str, key: str, table: str):
-    """Read a whole table. Returns None if the table does not exist.
+    """Read a whole table. Returns None if the table doesn't exist.
 
-    A missing table is NOT an error: `purchase_lots` only exists after 009 and
-    `viewer_grants` after 011, so a backup taken against an older database must
-    still succeed. It is recorded as missing in the manifest rather than
-    silently omitted — a backup that quietly skips a table is worse than one
-    that fails, because you only discover the gap during a restore.
+    A missing table isn't an error. purchase_lots only exists after migration
+    009 and viewer_grants after 011, so this still has to work on an older
+    database. It gets marked as missing in the manifest though, so I don't
+    find out a table was skipped when I'm trying to restore.
     """
     req = urllib.request.Request(
         f"{url}/rest/v1/{table}?select=*",
@@ -147,13 +144,13 @@ def main() -> None:
         "tables": data,
     }
 
-    # --- card images: bytes, not just paths ---
+    # --- card images: download the actual files, not just the paths ---
     img_dir = OUT / "images"
     fetched = skipped = failed = 0
     for row in data.get("cards", []):
         path = row.get("image_url")
-        # Legacy rows may hold a full URL rather than a storage path; those are
-        # not in our bucket and are skipped rather than guessed at.
+        # Some old rows have a full link instead of a path. Those aren't in my
+        # bucket so they get skipped.
         if not path or "://" in path:
             continue
         dest = img_dir / path
@@ -168,7 +165,7 @@ def main() -> None:
         try:
             dest.write_bytes(urllib.request.urlopen(req).read())
             fetched += 1
-        except Exception as exc:  # noqa: BLE001 - a bad image must not kill the backup
+        except Exception as exc:  # noqa: BLE001 - one bad image shouldn't stop the whole backup
             failed += 1
             print(f"   image FAILED {path}: {exc}")
 
@@ -192,7 +189,7 @@ def main() -> None:
     if missing:
         print(f"   not present: {', '.join(missing)}")
 
-    # --- verify: re-read what was written, don't trust the write ---
+    # --- verify: read the file back and make sure it actually saved ---
     if "--verify" in sys.argv:
         back = json.loads(jpath.read_text(encoding="utf-8"))
         ok = all(len(back["tables"][t]) == n for t, n in counts.items())
@@ -204,10 +201,9 @@ def main() -> None:
             raise SystemExit(1)
 
     # --- retention ---
-    # NOTE: backups/images/ is deliberately NOT pruned. Images are content-
-    # addressed by card id, they never change, and a pruned image cannot be
-    # re-fetched once the card is deleted from Supabase — which is exactly the
-    # scenario a backup exists for.
+    # backups/images/ doesn't get cleaned up on purpose. The images are saved by
+    # card id and never change, and if a card gets deleted from Supabase I
+    # can't download its image again. That's the whole reason for a backup.
     for pattern in ("dreamboat-*.json", "cards-*.csv"):
         old = sorted(OUT.glob(pattern))[:-KEEP]
         for f in old:

@@ -1,12 +1,10 @@
 """
-vision/ — card detection + OCR, importable by the deployed API.
+vision/ has the card detection and OCR code that /scan uses.
 
-Moved here from the project root on 2026-09-06. They used to live one level
-above backend/, which meant Railway (Root Directory = "backend") never shipped
-them: /scan returned 503 because `import card_vision` failed in the container,
-not because the CV dependencies were missing. Keeping them inside backend/ is
-what makes scanning deployable at all.
+These have to stay inside backend/. Railway only deploys the backend folder, so
+when they were in the project root they never made it to the server and /scan
+didn't work.
 
-Both modules still run as standalone CLI scripts:
+You can still run them on their own from the command line:
     python backend/vision/ocr_card.py --capture-mode sports --front ... --back ...
 """

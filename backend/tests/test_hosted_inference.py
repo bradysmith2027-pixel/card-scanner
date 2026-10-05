@@ -1,19 +1,18 @@
 """
-test_hosted_inference.py — unit tests for the Roboflow hosted detection path.
+test_hosted_inference.py
 
-Hosted inference is what makes /scan deployable (no torch), so the three things
-most likely to break it silently are pinned here. No network: httpx.post is
-mocked, so these cost nothing and consume no Roboflow credits.
+Tests for running the detector through Roboflow's API.
 
-  1. Confidence is sent as a PERCENT. The local `inference` package takes a
-     fraction (0.25); the REST API takes 0-100. Passing the fraction through
-     means a 0.25% threshold — every speculative box fires and
-     best_crop_per_class picks noise. That fails as bad OCR, not as an error,
-     which is exactly the kind of bug that costs an evening.
-  2. Boxes come back in ORIGINAL pixel coordinates. Large photos are downscaled
-     before upload, so predictions must be scaled back or every crop is wrong.
-  3. HTTP 402 raises HostedInferenceUnavailable, so the API can answer 503
-     ("scan locally") instead of 502 ("try again") when credits run out.
+No network, httpx.post is faked, so these don't cost anything or use credits.
+They check the three things most likely to break without anyone noticing:
+
+  1. Confidence gets sent as a percent. The local package uses 0.25 but the API
+     wants 0-100. Sending 0.25 would mean 0.25%, so every random box would
+     count and the OCR would just look bad instead of erroring.
+  2. Boxes come back in the original photo's size. Big photos get shrunk
+     before uploading, so the boxes have to be scaled back up.
+  3. A 402 (out of credits) turns into a 503 instead of a 502, so the app says
+     scanning isn't available instead of "try again".
 """
 
 from unittest.mock import patch
@@ -77,8 +76,8 @@ def test_small_image_is_not_rescaled():
 
 
 def test_large_image_predictions_are_scaled_back_to_original_pixels():
-    # 3200px longest edge -> downscaled to the 1600px cap, i.e. scale = 0.5.
-    # A box the API reports at x=100 in the shrunk frame is really x=200.
+    # 3200px gets shrunk to 1600px, so the scale is 0.5. A box at x=100 in the
+    # shrunk photo is really at x=200.
     payload = {"predictions": [_prediction(100, 150, 40, 30)]}
     model = card_vision.load_hosted_model("ws/model-1", "key")
     with patch("httpx.post", return_value=_FakeResponse(payload=payload)):
@@ -89,7 +88,7 @@ def test_large_image_predictions_are_scaled_back_to_original_pixels():
 
 
 def test_scaled_predictions_survive_the_detect_conversion():
-    """End-to-end through detect(): scaled coords must land in the box output."""
+    """Goes all the way through detect() to make sure the scaled boxes come out right."""
     payload = {"predictions": [_prediction(100, 150, 40, 30, name="card_number")]}
     model = card_vision.load_hosted_model("ws/model-1", "key")
     with patch("httpx.post", return_value=_FakeResponse(payload=payload)):
@@ -114,7 +113,7 @@ def test_billing_and_auth_failures_raise_hosted_unavailable(status):
 
 
 def test_out_of_credits_surfaces_as_scan_unavailable_not_a_generic_error():
-    """402 must reach the router as ScanUnavailable -> 503, never a bare 502."""
+    """A 402 should become ScanUnavailable and then a 503, not a 502."""
     from app.scan_service import ScanUnavailable, _crops
 
     model = card_vision.load_hosted_model("ws/model-1", "key")

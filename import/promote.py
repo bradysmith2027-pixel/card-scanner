@@ -1,34 +1,32 @@
 """
-promote.py — push dry-run-cards.json into the live `cards` table.
+promote.py
 
-RUN THE TRANSFORM FIRST. This reads dry-run-cards.json and writes to Supabase
-via PostgREST using the service_role key (RLS is bypassed, so `user_id` must be
-stamped explicitly on every row — there is no auth context to infer it from).
+Puts dry-run-cards.json into the real cards table.
 
-SAFETY
-    --canary   POST exactly one row, print the server's response, stop.
-               Always run this first. A schema mismatch fails on 1 row, not 90.
-    --go       POST all rows in batches.
-    (default)  validate only; touches nothing.
+Run transform_sales.py first. This reads dry-run-cards.json and saves it to
+Supabase with the service_role key. That skips RLS, so user_id has to be set on
+every row by hand since there's no logged in user.
 
-SCHEMA MISMATCHES THIS FIXES — found by probing the live table, NOT by reading
-the migrations, which is why they were caught at all:
+Options:
+    --canary   send exactly one row, print what comes back, and stop.
+               Always do this first so a problem fails on 1 row, not 90.
+    --go       send all the rows in batches.
+    (default)  just check everything, doesn't save anything.
 
-    player_name  -> player        The DB column is `player`. `player_name` is the
-                                  SCANNER's field name; the frontend has always
-                                  translated between them (noted in CLAUDE.md as
-                                  a Step 6 reconciliation). A straight POST of
-                                  `player_name` 400s on every row.
-    seller_name  -> notes         THERE IS NO seller_name COLUMN. The sheet's
-                                  Seller is real provenance (66 of 90 cards came
-                                  from Discord, most from one seller), so it goes
-                                  into notes rather than being dropped.
-    _sheet_row   -> notes         Internal. Kept as provenance so any row can be
-                                  traced back to the spreadsheet line it came
-                                  from — the thing that makes a bad import
-                                  fixable instead of permanent.
-    _roi_exclude -> stripped      Internal flag, no column. Recorded in the audit
-                                  doc instead; row 64 is the only one.
+Things that don't match the real table (I found these by testing against the
+actual table, the migrations didn't mention them):
+
+    player_name  -> player        The column is player. player_name is what the
+                                  scanner calls it, and the frontend always
+                                  switched them. Sending player_name fails on
+                                  every row.
+    seller_name  -> notes         There's no seller_name column. Who I bought from
+                                  still matters (66 of 90 cards came from Discord,
+                                  mostly one seller), so it goes in notes.
+    _sheet_row   -> notes         Which spreadsheet row it came from, so if
+                                  something imports wrong I can trace it back.
+    _roi_exclude -> removed       Just a flag, no column for it. Row 64 is the
+                                  only one.
 """
 
 from __future__ import annotations
@@ -43,7 +41,7 @@ HERE = Path(__file__).parent
 ENV = HERE.parent / "backend" / ".env"
 BATCH = 20
 
-# Columns that actually exist on `cards`, probed from the live table.
+# The columns that actually exist on cards, checked against the real table.
 ALLOWED = {
     "user_id", "player", "year", "set_name", "card_number", "card_type", "serial",
     "category", "purchase_price", "purchase_date", "shipping_in", "purchase_tax",
@@ -65,13 +63,13 @@ def load_env() -> dict:
 
 
 def to_row(card: dict, user_id: str) -> dict:
-    """Map one dry-run card onto the real `cards` schema."""
+    """Turn one card from the dry run into a row for the real cards table."""
     row = {k: v for k, v in card.items() if k in ALLOWED}
     row["user_id"] = user_id
-    row["player"] = card["player_name"]              # the rename
+    row["player"] = card["player_name"]              # rename it
 
-    # Provenance. Without the sheet row number a wrong import is unfixable,
-    # because nothing ties a DB row back to the line it came from.
+    # Save the spreadsheet row number. Without it there's no way to tell which
+    # line a card came from if it imported wrong.
     bits = [f"Imported from CardSalesTrackerV3 Sales tab, row {card['_sheet_row']}"]
     if card.get("seller_name"):
         bits.append(f"Seller: {card['seller_name']}")
@@ -79,8 +77,8 @@ def to_row(card: dict, user_id: str) -> dict:
         bits.append("BATCH ROW — multiple sales on one line; exclude from ROI averages")
     row["notes"] = ". ".join(bits)
 
-    # Drop nulls so PostgREST applies column defaults rather than writing NULL
-    # into a NOT NULL column and failing the whole batch.
+    # Take out the empty values so the database uses its defaults instead of
+    # putting NULL in a required column and failing the whole batch.
     return {k: v for k, v in row.items() if v is not None}
 
 
@@ -126,15 +124,14 @@ def main() -> None:
         return
 
     if mode == "--go":
-        # 🔴 PostgREST rejects a bulk insert whose objects have DIFFERENT KEY SETS
-        # with PGRST102 "All object keys must match". Nulls are stripped per row
-        # (so columns fall back to their defaults instead of writing NULL into a
-        # NOT NULL column), which makes every row's key set different — a sold
-        # card carries sale fields an unsold one does not.
+        # Supabase rejects a batch if the rows don't all have the same fields
+        # (PGRST102 "All object keys must match"). Since empty values get taken
+        # out of each row, the rows end up different. A sold card has sale
+        # fields and an unsold one doesn't.
         #
-        # Padding the union with explicit nulls would defeat the stripping and
-        # fail on NOT NULL columns. So: group rows by their key signature and
-        # send one batch per shape. Same number of rows, a handful of requests.
+        # Filling the missing ones with null would fail on required columns. So
+        # rows get grouped by which fields they have, and each group is sent as
+        # its own batch.
         groups: dict[tuple, list] = {}
         for r in rows:
             groups.setdefault(tuple(sorted(r)), []).append(r)

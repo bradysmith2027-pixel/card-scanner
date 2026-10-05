@@ -1,28 +1,27 @@
 """
 card_vision.py
 
-Shared helpers for talking to the trained Roboflow model: load it, run
-detection on a card photo, and crop out each detected field.
+Helpers for my Roboflow model: load it, run it on a card photo, and crop out
+each field it finds.
 
-Used by ocr_card.py (the real OCR step). Kept as its own file rather than
-refactoring crop_card_regions.py to share it, so the already-working crop
-script stays untouched.
+ocr_card.py uses this. I made it its own file instead of changing
+crop_card_regions.py so I didn't break the crop script that already works.
 """
 
 DEFAULT_MODEL_ID = "bradys-workspace-wqkgm/dreamboat-slabs-3-yolov8n-t1"
 
-# One-piece cards only ever get these two fields per the project spec.
+# One Piece cards only have these two fields.
 ONE_PIECE_ALLOWED_CLASSES = {"player_name", "card_number"}
 
-# Small buffer added around every detected box before cropping, so text
-# right at the edge of a box doesn't get sliced off.
+# A little extra space around each box before cropping so text right on the
+# edge doesn't get cut off.
 PADDING_PIXELS = 6
 
 
 def _field(obj, *names):
     """
-    Pull a field off a prediction whether it comes back as an object with
-    attributes (e.g. prediction.x) or a plain dict (e.g. prediction["x"]).
+    Get a value off a prediction whether it's an object (prediction.x) or a
+    dict (prediction["x"]).
     """
     for name in names:
         if hasattr(obj, name):
@@ -34,10 +33,10 @@ def _field(obj, *names):
 
 def load_model(model_id, api_key):
     """
-    Local inference: downloads the weights and runs them in-process.
+    Runs the model locally. Downloads the weights and runs them right here.
 
-    Pulls in `inference`, which drags torch (~2-4 GB). Fine on Brady's laptop,
-    impossible on Railway — use load_hosted_model() there.
+    This needs the inference package, which needs torch (a few GB). Works on my
+    laptop but not on Railway, so use load_hosted_model() there.
     """
     from inference import get_model
     return get_model(model_id=model_id, api_key=api_key)
@@ -45,19 +44,18 @@ def load_model(model_id, api_key):
 
 # --- Hosted inference ------------------------------------------------------
 #
-# Roboflow's REST endpoint runs the SAME trained weights on their servers, so
-# accuracy is unchanged (v3, mAP 87.4%) but the backend needs no torch. This is
-# what makes /scan deployable.
+# Roboflow's API runs my same model on their servers, so it's just as accurate
+# but the backend doesn't need torch.
 #
-# The returned object exposes .infer(image, confidence) so it is a drop-in for
-# the local model above — detect() below does not care which one it got, and
-# _field() already reads the dict-shaped predictions the REST API returns.
+# It has the same .infer(image, confidence) as the local model, so detect()
+# doesn't care which one it gets. _field() already handles the dicts the API
+# sends back.
 
 HOSTED_DETECT_URL = "https://detect.roboflow.com"
 
-# Roboflow's hosted endpoint rejects very large uploads, and a phone photo is
-# far bigger than the model's input anyway. Longest side is capped before
-# encoding; boxes come back in the ORIGINAL pixel space (see _HostedModel).
+# Roboflow's API won't take really big uploads, and phone photos are way bigger
+# than the model needs anyway. So the photo gets shrunk first, and the boxes
+# get scaled back up to the original size (see _HostedModel).
 MAX_HOSTED_EDGE_PIXELS = 1600
 
 HOSTED_TIMEOUT_SECONDS = 30
@@ -65,12 +63,11 @@ HOSTED_TIMEOUT_SECONDS = 30
 
 class HostedInferenceUnavailable(Exception):
     """
-    The hosted endpoint is reachable but refuses to serve this account.
+    Roboflow's API is up but won't run for my account.
 
-    Almost always exhausted credits (HTTP 402). Kept separate from a generic
-    network error because it is not transient and retrying cannot fix it — the
-    API layer turns this into a 503 "scan isn't available here" rather than a
-    502 "try again", so the UI doesn't tell Brady to retry forever.
+    Usually means I'm out of credits (402). It's separate from a normal network
+    error because trying again won't fix it. The API turns it into a 503 so the
+    app says scanning isn't available instead of telling me to try again.
     """
 
 
@@ -87,9 +84,9 @@ class _HostedModel:
 
         original_h, original_w = image.shape[:2]
 
-        # Downscale for the upload, remembering the factor so the boxes can be
-        # mapped back. Without this, every coordinate would be silently wrong
-        # whenever a photo exceeded the cap.
+        # Shrink the photo for the upload and remember by how much, so the
+        # boxes can be scaled back. Otherwise the boxes would be in the wrong
+        # spot for any big photo.
         scale = min(1.0, MAX_HOSTED_EDGE_PIXELS / max(original_h, original_w))
         if scale < 1.0:
             send = cv2.resize(
@@ -104,11 +101,9 @@ class _HostedModel:
         if not ok:
             raise RuntimeError("Could not JPEG-encode the image for hosted inference.")
 
-        # 🔴 The hosted REST API takes confidence as a PERCENT (0-100); the
-        # local `inference` package takes a fraction (0-1). Passing 0.25
-        # straight through would mean a 0.25% threshold, so every speculative
-        # box fires and best_crop_per_class picks noise -- which would look
-        # like bad OCR, not like a bug. Convert explicitly.
+        # The API wants confidence as a percent (0-100) but the local package
+        # uses 0-1. If 0.25 got sent as is, it would mean 0.25%, so every
+        # random box would count and the OCR would just look bad. So convert it.
         confidence_percent = confidence * 100 if confidence <= 1 else confidence
 
         response = httpx.post(
@@ -122,9 +117,8 @@ class _HostedModel:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=HOSTED_TIMEOUT_SECONDS,
         )
-        # 402 = out of hosted-inference credits (the free tier is 15/month for
-        # the whole account, and training consumes them too). 401/403 = key
-        # rejected. None of these are retryable.
+        # 402 = out of credits (free plan is 15 a month and training uses them
+        # too). 401/403 = bad key. Trying again won't fix any of these.
         if response.status_code in (401, 402, 403):
             raise HostedInferenceUnavailable(
                 f"Roboflow hosted inference refused the request "
@@ -134,7 +128,7 @@ class _HostedModel:
         response.raise_for_status()
         results = response.json()
 
-        # Map coordinates back to the original image if we shrank it.
+        # Scale the boxes back to the original photo size if it got shrunk.
         if scale < 1.0:
             for pred in results.get("predictions", []):
                 for key in ("x", "y", "width", "height"):
@@ -157,11 +151,10 @@ def get_predictions(results):
 
 def detect(model, image, confidence=0.25, card_type=None):
     """
-    Run detection on an already-loaded (BGR/cv2) image. Returns a list of
-    dicts: {"class_name", "confidence", "x1", "y1", "x2", "y2"} (already
-    converted from Roboflow's center x/y/width/height to a bounding box).
-    If card_type == "one_piece", filters out any class One Piece cards
-    aren't supposed to have (per the project spec).
+    Run the model on an image that's already loaded (cv2). Returns a list of
+    dicts: {"class_name", "confidence", "x1", "y1", "x2", "y2"}. Roboflow gives
+    the center and width/height, so this turns it into box corners.
+    For One Piece cards it drops any field One Piece cards don't have.
     """
     img_height, img_width = image.shape[:2]
     raw_results = model.infer(image, confidence=confidence)
@@ -199,9 +192,8 @@ def crop(image, box):
 
 def best_crop_per_class(image, boxes):
     """
-    If the model fires more than one box for the same field on one photo,
-    keep only the highest-confidence one -- OCR needs a single crop per
-    field to send to GPT-4o, not several competing ones.
+    If the model finds more than one box for the same field, keep the one it's
+    most confident about. GPT-4o needs one crop per field, not a few.
     """
     best = {}
     for box in boxes:

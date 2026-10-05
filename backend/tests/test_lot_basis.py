@@ -1,7 +1,7 @@
-"""Tests for lot cost allocation.
+"""Tests for splitting a lot's cost.
 
-The guarantee: a lot's cost is fully distributed and never invented. Entered
-cards + bulk remainder must equal the lot's all-in cost, to the penny.
+The main thing: the cards I entered plus the bulk remainder always add up to
+what the lot cost, to the cent. No cost gets lost or made up.
 """
 
 from decimal import Decimal
@@ -31,7 +31,7 @@ def test_all_in_includes_shipping_tax_and_other():
 
 
 def test_pro_rata_not_even_split():
-    """The whole point. A $150 card and a $50 card split $200 as 150/50."""
+    """The basic case. A $150 card and a $50 card split $200 as 150/50."""
     r = allocate_lot_basis(
         lot("200.00"),
         [LotCard("hit", Decimal("150")), LotCard("mid", Decimal("50"))],
@@ -41,10 +41,10 @@ def test_pro_rata_not_even_split():
 
 
 def test_the_yamal_scenario_bulk_remainder_protects_the_hit():
-    """The case from the T1 plan: 50 cards, $200, only the hit entered.
+    """50 cards for $200, and I only enter the one good card.
 
-    Without a bulk remainder the hit absorbs the entire $200 and looks like a
-    loser. With the commons valued, it carries ~its fair share.
+    Without a bulk remainder, that card takes the whole $200 and looks like a
+    loss. With the commons given a value, it only takes its fair share.
     """
     no_bulk = allocate_lot_basis(lot("200.00"), [LotCard("yamal", Decimal("120"))])
     assert no_bulk.allocations["yamal"] == Decimal("200.00")
@@ -71,10 +71,10 @@ def test_everything_sums_to_all_in_including_bulk():
 
 
 def test_pennies_reconcile_across_cards_and_bulk_together():
-    """The leftover cent must not always land in bulk.
+    """The leftover penny shouldn't always end up on the bulk.
 
-    Allocating cards first and giving bulk the remainder would drift the lot
-    out of balance in one direction over time.
+    If the cards got split first and the bulk just got whatever was left, it
+    would always lean the same way.
     """
     r = allocate_lot_basis(
         lot("100.00"),
@@ -85,7 +85,7 @@ def test_pennies_reconcile_across_cards_and_bulk_together():
 
 
 def test_shipping_and_tax_are_allocated_too():
-    """Lot shipping is part of basis — it must reach the cards."""
+    """Shipping on the lot is part of the cost, so it has to get split onto the cards."""
     r = allocate_lot_basis(
         lot("100.00", shipping_in="20.00"), [LotCard("a", Decimal("1"))]
     )
@@ -101,7 +101,7 @@ def test_no_values_falls_back_to_even_split_and_warns():
 
 
 def test_even_split_fallback_ignores_bulk_rather_than_inventing_a_ratio():
-    """With no card values there is nothing to weigh bulk against."""
+    """With no card values there's nothing to compare the bulk to."""
     r = allocate_lot_basis(
         lot("90.00"), [LotCard(x) for x in "abc"], bulk_remainder_value="1000"
     )
@@ -127,6 +127,6 @@ def test_negative_bulk_is_rejected():
 
 
 def test_free_lot_allocates_zero_not_an_error():
-    """A traded-for or gifted lot has zero basis. That's valid, not a failure."""
+    """A lot I traded for or got for free costs $0. That's fine, not an error."""
     r = allocate_lot_basis(lot("0"), [LotCard("a", Decimal("50"))])
     assert r.allocations["a"] == Decimal("0.00")

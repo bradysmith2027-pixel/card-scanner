@@ -1,12 +1,12 @@
-"""Endpoint tests for POST /trades.
+"""Tests for POST /trades.
 
-The existing `fake_db` fixture models ONE table. A trade touches four
-(cards read, trades insert, cards insert, trade_items insert, cards update),
-so this module ships its own multi-table fake.
+The normal fake_db only handles one table, and a trade uses a few (read cards,
+add the trade, add cards, add trade_items, update cards), so this file has its
+own fake.
 
-What these tests are really guarding: a trade must move basis and realize
-nothing. If any of them start reporting revenue on a trade, the bug that
-corrupted the old spreadsheet is back.
+The main thing these check: a trade moves cost and doesn't count as profit. If
+any of these start showing money in on a trade, that's the same problem my old
+spreadsheet had.
 """
 
 from decimal import Decimal
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 client = TestClient(app)
 
 
-# --- multi-table in-memory fake -------------------------------------------
+# --- fake database with more than one table -------------------------------
 class _Resp:
     def __init__(self, data):
         self.data = data
@@ -119,7 +119,7 @@ def post(payload):
     return client.post("/trades", json=payload)
 
 
-# --- the core guarantee ----------------------------------------------------
+# --- the main thing --------------------------------------------------------
 def test_basis_carries_and_nothing_is_realized(auth, db):
     db.tables["cards"] = [card("A", "100.00")]
     r = post({
@@ -131,13 +131,13 @@ def test_basis_carries_and_nothing_is_realized(auth, db):
     body = r.json()
     assert Decimal(body["total_basis"]) == Decimal("100.00")
     assert Decimal(body["realized_gain"]) == Decimal("0.00")
-    # The received card's purchase_price IS the carried basis.
+    # The new card's purchase_price is the cost that moved over.
     assert db.inserts["cards"][0]["purchase_price"] == "100.00"
     assert db.inserts["cards"][0]["acquisition_source"] == "trade"
 
 
 def test_all_in_cost_not_just_purchase_price_carries(auth, db):
-    """Shipping and tax paid on the ORIGINAL card must carry too."""
+    """Shipping and tax I paid on the card I gave up should move over too."""
     db.tables["cards"] = [
         card("A", "100.00", shipping_in="8.00", purchase_tax="7.00", other_costs="5.00")
     ]
@@ -191,7 +191,7 @@ def test_missing_est_values_warn_about_even_split(auth, db):
     assert any("evenly" in w for w in body["warnings"])
 
 
-# --- lineage + state -------------------------------------------------------
+# --- trade_items and statuses ----------------------------------------------
 def test_given_card_is_marked_traded_away_and_lineage_written(auth, db):
     db.tables["cards"] = [card("A")]
     post({
@@ -213,7 +213,7 @@ def test_trade_row_records_signed_boot(auth, db):
     assert db.inserts["trades"][0]["cash_boot"] == "-25.00"
 
 
-# --- refusals --------------------------------------------------------------
+# --- things that should get rejected ---------------------------------------
 def test_unknown_card_is_404(auth, db):
     r = post({
         "trade_date": "2026-09-14", "given_card_ids": ["nope"],
@@ -223,7 +223,7 @@ def test_unknown_card_is_404(auth, db):
 
 
 def test_already_traded_card_is_409(auth, db):
-    """Trading the same card twice would create basis out of nothing."""
+    """The same card twice in one trade would count its cost twice."""
     db.tables["cards"] = [card("A", status="traded_away")]
     r = post({
         "trade_date": "2026-09-14", "given_card_ids": ["A"],
@@ -248,7 +248,7 @@ def test_no_given_cards_is_rejected(auth, db):
 
 
 def test_position_type_defaults_to_flip_on_traded_in_card(auth, db):
-    """A traded-in card is a normal card — the hold rule still applies."""
+    """A card from a trade is a normal card, so the flip/hold rule still applies."""
     db.tables["cards"] = [card("A")]
     post({
         "trade_date": "2026-09-14", "given_card_ids": ["A"],
@@ -258,7 +258,7 @@ def test_position_type_defaults_to_flip_on_traded_in_card(auth, db):
 
 
 def test_trade_insert_failure_does_not_move_any_card(auth, db):
-    """The destructive step runs LAST, so an early failure moves nothing."""
+    """Marking my cards traded_away happens last, so an early failure doesn't change them."""
     db.tables["cards"] = [card("A")]
     db.fail_on = "trades"
     r = post({

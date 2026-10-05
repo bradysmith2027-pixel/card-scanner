@@ -1,24 +1,23 @@
-"""mailer.py — send a report by email.
+"""mailer.py
 
-Three transports. `weekly_report.py` picks one at runtime: Brevo if
-`BREVO_API_KEY` is set, otherwise Gmail SMTP.
-  * `send_brevo` — Brevo HTTPS API. THE ONE RAILWAY USES (chosen 2026-09-30),
-                   because Railway blocks outbound SMTP in the runtime
-                   container below the Pro plan. See the Brevo section below.
-  * `send_smtp`  — Gmail SMTP. Still the one the LAPTOP uses, and still the
-                   best deliverability, since it sends genuinely as the Gmail
-                   account. Works anywhere port 587 is open.
-  * `send`       — Resend HTTP API. Kept, working and tested, for the day
-                   `dreamboatslabs.xyz` comes off clientHold and a proper
-                   sending domain exists.
+Sends the report emails.
 
-Deliberately tiny. Everything that builds a message is pure, so it can be
-tested without a network call or credentials; only `send`/`send_smtp` touch
-the wire.
+There are three ways to send. weekly_report.py uses Brevo if BREVO_API_KEY is
+set, and Gmail SMTP if it's not.
+  * send_brevo: Brevo's API. This is what Railway uses, because Railway blocks
+                sending email over SMTP unless you're on the Pro plan. More on
+                that below.
+  * send_smtp:  Gmail SMTP. What my laptop uses. It sends as the actual Gmail
+                account so it doesn't end up in spam.
+  * send:       Resend's API. Still works, I'm keeping it for when I get my
+                dreamboatslabs.xyz domain back.
 
-🔴 NOTHING IN HERE MAY LOG MESSAGE CONTENT. The report body carries purchase
-prices, margins, buyer names and inventory value. Log subjects, recipients and
-status codes — never `text` or `html`.
+The parts that build the message don't touch the network, so they can be
+tested without any keys. Only the send functions actually send anything.
+
+Never log the email content. The report has purchase prices, margins, buyer
+names and inventory value. Logging the subject, who it went to and status
+codes is fine, but never the text or html.
 """
 
 from __future__ import annotations
@@ -36,27 +35,23 @@ GMAIL_SMTP_PORT = 587  # STARTTLS
 
 RESEND_ENDPOINT = "https://api.resend.com/emails"
 
-#: 🔴 LOAD-BEARING. Resend sits behind Cloudflare, which bans urllib's default
-#: `Python-urllib/3.x` User-Agent by browser signature. The symptom is a
-#: **403 with body `error code: 1010`** — which reads like an auth failure and
-#: sends you hunting for a bad API key. It is not: 1010 is a Cloudflare code,
-#: not a Resend one. Resend's own errors come back as JSON.
-#: Any identifiable UA is accepted. Do not remove this header.
+# Don't remove this. Resend is behind Cloudflare, and Cloudflare blocks the
+# default Python-urllib User-Agent. You get a 403 with "error code: 1010",
+# which looks like a bad API key but isn't. 1010 is a Cloudflare error, not a
+# Resend one (Resend's errors come back as JSON). Any normal User-Agent works.
 USER_AGENT = "dreamboat-slabs-reports/1.0"
 
-#: Resend's shared sending domain. `dreamboatslabs.xyz` is on clientHold at the
-#: registrar, so a custom From domain is not available and deliverability from
-#: a bare unverified domain would be poor anyway. Revisit when the domain is back.
+# Resend's shared sending domain. My dreamboatslabs.xyz domain is on hold right
+# now so I can't send from it. Switch this once I have the domain back.
 DEFAULT_FROM = "Dreamboat Slabs <onboarding@resend.dev>"
 
 
 class MailError(RuntimeError):
-    """Raised when the provider refuses the message.
+    """Error for when the email service won't send the message.
 
-    This is intentionally loud. A scheduled job that swallows send failures
-    produces the single worst outcome available: you stop receiving reports and
-    have no idea, because silence is exactly what a healthy quiet week looks
-    like too.
+    This needs to fail loudly. If the job just ignored send errors, I'd stop
+    getting reports and not even know, since no email looks the same as a slow
+    week.
     """
 
 
@@ -69,12 +64,11 @@ def _escape(text: str) -> str:
 
 
 def text_to_html(text: str) -> str:
-    """Wrap a plain-text report in minimal, inline-styled HTML.
+    """Wrap a plain text report in some basic HTML.
 
-    Email clients strip <style> blocks and ignore external stylesheets, so the
-    styling has to be inline and the layout has to survive being ignored
-    entirely. A <pre> block does both: if every style is dropped the report is
-    still a readable monospaced column.
+    Email apps remove <style> blocks, so the styles have to be inline. Using a
+    <pre> block means even if all the styling gets stripped, it's still
+    readable.
     """
     body = _escape(text)
     return (
@@ -86,7 +80,7 @@ def text_to_html(text: str) -> str:
 
 
 def _addresses(value: str | list[str] | None) -> list[str]:
-    """Normalise one address, a list, or a comma-separated string to a list."""
+    """Turn one address, a list, or a comma separated string into a list."""
     if value is None:
         return []
     if isinstance(value, str):
@@ -102,12 +96,10 @@ def build_payload(
     cc: str | list[str] | None = None,
     bcc: str | list[str] | None = None,
 ) -> dict:
-    """Assemble the Resend request body. Pure — no network, no key needed.
+    """Build the Resend request. Doesn't send anything or need a key.
 
-    ⚠️ CC vs BCC matters here more than in ordinary mail. This report carries
-    purchase prices, margins and buyer names, and a CC shows every recipient's
-    address to every other recipient. Use BCC when the readers are not a team
-    who already know each other.
+    CC vs BCC matters here. CC shows everyone's email address to everyone else
+    on it. Use BCC if the people getting it don't already know each other.
     """
     recipients = _addresses(to)
     if not recipients:
@@ -124,7 +116,7 @@ def build_payload(
     }
     cc_list = _addresses(cc)
     bcc_list = _addresses(bcc)
-    # Omit rather than send empty arrays — some providers treat [] as an error.
+    # Leave these out instead of sending empty lists. Some services error on [].
     if cc_list:
         payload["cc"] = cc_list
     if bcc_list:
@@ -133,7 +125,7 @@ def build_payload(
 
 
 def build_headers(api_key: str) -> dict:
-    """Request headers. Pure, so the User-Agent rule can be tested."""
+    """The request headers. Separate so the User-Agent can be tested."""
     return {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -151,10 +143,10 @@ def send(
     bcc: str | list[str] | None = None,
     timeout: int = 20,
 ) -> str:
-    """Send one email. Returns the provider's message id.
+    """Send one email and return Resend's message id.
 
-    Raises MailError on any non-2xx response, with the provider's message but
-    WITHOUT the body that failed to send.
+    Throws MailError if it doesn't get a 2xx back. The error includes Resend's
+    message but not the email body.
     """
     if not api_key:
         raise MailError("RESEND_API_KEY is not set")
@@ -178,20 +170,19 @@ def send(
 
 
 # ==========================================================================
-# Gmail SMTP transport
+# Gmail SMTP
 # ==========================================================================
-# Chosen 2026-09-29 over Resend. Resend cannot send from a Gmail address at
-# all — it only sends from a DNS-verified domain, and until the account has
-# one it may only mail its own signup address and may not CC anyone. Both of
-# Brady's domains are on clientHold at Namecheap behind a ticket that has gone
-# quiet three times, so "verify a domain" was not a plan with a date on it.
+# I went with this over Resend. Resend can't send from a Gmail address, only
+# from your own verified domain, and until you have one it can only email the
+# address you signed up with. Both my domains are on hold at Namecheap right
+# now, so that wasn't happening any time soon.
 #
-# Gmail SMTP needs no domain, sends genuinely FROM dreamboat.slabs@gmail.com,
-# allows CC, and Gmail-to-Gmail delivery does not land in spam.
+# Gmail SMTP doesn't need a domain, sends from dreamboat.slabs@gmail.com, lets
+# me CC people, and Gmail to Gmail doesn't go to spam.
 #
-# 🔴 Requires an APP PASSWORD, not the account password. Google rejects the
-# real password outright. Generate one at myaccount.google.com/apppasswords
-# (2-Step Verification must be on first, or the page does not exist).
+# This needs an app password, not the normal Gmail password (Google rejects
+# that). Make one at myaccount.google.com/apppasswords. 2-Step Verification has
+# to be on first or that page won't show up.
 
 
 def build_message(
@@ -202,12 +193,11 @@ def build_message(
     cc: str | list[str] | None = None,
     html: Optional[str] = None,
 ) -> EmailMessage:
-    """Build a multipart text+HTML message. Pure — no connection made.
+    """Build an email with a text part and an HTML part. Doesn't connect to anything.
 
-    🔴 BCC IS DELIBERATELY NOT A HEADER HERE. A Bcc: header that reaches the
-    wire defeats the entire point of blind copying — every recipient sees the
-    list. Blind copies are delivered by naming them in the SMTP envelope
-    instead; see `envelope_recipients`.
+    BCC isn't added as a header on purpose. If it was, everyone would see who
+    got BCC'd, which defeats the point. BCC people get added when it's sent
+    instead (see envelope_recipients).
     """
     recipients = _addresses(to)
     if not recipients:
@@ -223,9 +213,8 @@ def build_message(
         msg["Cc"] = ", ".join(cc_list)
     msg["Subject"] = subject
     msg["Message-ID"] = make_msgid(domain="dreamboatslabs.local")
-    # Plain text first, HTML second: in a multipart/alternative the LAST part
-    # is what a capable client renders, and the first is what a text-only
-    # client (or a screen reader preferring text) falls back to.
+    # Text first, then HTML. Email apps show the last version they can handle,
+    # so normal apps show the HTML and text-only ones use the text.
     msg.set_content(text)
     msg.add_alternative(html or text_to_html(text), subtype="html")
     return msg
@@ -236,10 +225,9 @@ def envelope_recipients(
     cc: str | list[str] | None = None,
     bcc: str | list[str] | None = None,
 ) -> list[str]:
-    """Everyone the message is actually delivered to, headers aside.
+    """Everyone the email actually goes to (to, cc and bcc).
 
-    De-duplicated, because naming the same address twice makes Gmail deliver
-    two copies.
+    Duplicates get removed, otherwise Gmail sends the same person two copies.
     """
     seen: list[str] = []
     for addr in _addresses(to) + _addresses(cc) + _addresses(bcc):
@@ -260,11 +248,10 @@ def send_smtp(
     html: Optional[str] = None,
     timeout: int = 30,
 ) -> str:
-    """Send via Gmail SMTP. Returns the Message-ID.
+    """Send through Gmail SMTP and return the Message-ID.
 
-    Raises MailError on any failure — loudly, because a scheduled job that
-    swallows send errors leaves you with no report and no signal, and a
-    healthy quiet week looks identical to a broken one.
+    Throws MailError if anything goes wrong. It needs to be loud so I notice,
+    since no email looks the same as a slow week.
     """
     if not user:
         raise MailError("GMAIL_USER is not set")
@@ -295,35 +282,30 @@ def send_smtp(
 
 
 # ==========================================================================
-# Brevo HTTP transport
+# Brevo
 # ==========================================================================
-# Chosen 2026-09-30, after the Railway cron service proved it cannot use SMTP.
+# I added this because the Railway cron job couldn't send with SMTP.
 #
-# 🔴 THE FINDING THAT FORCED THIS: Railway blocks outbound SMTP (25/465/587/
-# 2525) in the RUNTIME container on plans below Pro, but NOT in the build
-# environment. The same commit, same credentials, sent fine at 16:13 from a
-# build command and died at 16:27 from the deployed process with
-# `[Errno 101] Network is unreachable`. HTTPS on 443 works in both — the same
-# failing run had already made three successful Supabase calls before it
-# reached the mail step.
+# Railway blocks SMTP ports (25/465/587/2525) on plans below Pro, but only
+# when the app is running, not while it's building. That's why one test email
+# went through (I had the report in the build command) and the next one failed
+# with "[Errno 101] Network is unreachable". Regular HTTPS works fine, which is
+# how Brevo sends.
 #
-# ⚠️ DO NOT "fix" runtime SMTP by moving the report into a build command. It
-# would fire on every build, never on a schedule, and not at all on a Sunday,
-# because a cron service only builds when the code changes. It would look like
-# it worked and then quietly stop.
+# Don't try to get around this by running the report in the build command. It
+# would only send when the code changes, not on Sundays.
 #
-# Brevo over Resend: Resend sends only from a DNS-verified domain, and both of
-# Brady's domains are on clientHold. Brevo verifies a SINGLE SENDER ADDRESS by
-# emailing it a code, so `dreamboat.slabs@gmail.com` can send with no domain.
+# Brevo instead of Resend because Resend needs a verified domain and mine are
+# on hold. Brevo just verifies one email address by sending it a code, so
+# dreamboat.slabs@gmail.com works without a domain.
 
 BREVO_ENDPOINT = "https://api.brevo.com/v3/smtp/email"
 
 
 def split_address(value: str) -> dict:
-    """`"Name <a@b.com>"` -> `{"name": ..., "email": ...}`; bare -> email only.
+    """"Name <a@b.com>" -> {"name": ..., "email": ...}. Just an address -> email only.
 
-    Pure. Brevo wants the display name and the address as separate JSON keys,
-    unlike Resend and SMTP which both take one combined header string.
+    Brevo wants the name and the address split up, unlike Resend and SMTP.
     """
     value = (value or "").strip()
     if value.endswith(">") and "<" in value:
@@ -341,10 +323,10 @@ def build_brevo_payload(
     bcc: str | list[str] | None = None,
     html: Optional[str] = None,
 ) -> dict:
-    """Assemble the Brevo request body. Pure — no network, no key needed.
+    """Build the Brevo request. Doesn't send anything or need a key.
 
-    🔴 The sender address MUST be one Brevo has verified, or the API returns
-    400 `sender_not_valid`. Verification is per-ADDRESS here, not per-domain.
+    The sender has to be an address I verified in Brevo or it returns a 400
+    sender_not_valid.
     """
     recipients = _addresses(to)
     if not recipients:
@@ -359,7 +341,7 @@ def build_brevo_payload(
         "textContent": text,
         "htmlContent": html or text_to_html(text),
     }
-    # Omit rather than send empty arrays — Brevo rejects [] on these keys.
+    # Leave these out instead of sending empty lists. Brevo errors on [].
     cc_list = _addresses(cc)
     bcc_list = _addresses(bcc)
     if cc_list:
@@ -370,12 +352,11 @@ def build_brevo_payload(
 
 
 def build_brevo_headers(api_key: str) -> dict:
-    """Request headers. Pure, so the api-key rule can be tested.
+    """The request headers. Separate so the api-key header can be tested.
 
-    🔴 Brevo authenticates with a bare `api-key` header, NOT
-    `Authorization: Bearer`. Sending Bearer returns 401 with a message about a
-    missing key, which reads exactly like a wrong key and sends you to
-    regenerate a perfectly good one.
+    Brevo uses an api-key header, not Authorization: Bearer. If you send Bearer
+    you get a 401 that says the key is missing, which makes it look like the
+    key is wrong when it isn't.
     """
     return {
         "api-key": api_key,
@@ -396,10 +377,10 @@ def send_brevo(
     html: Optional[str] = None,
     timeout: int = 20,
 ) -> str:
-    """Send one email via Brevo's HTTPS API. Returns the provider message id.
+    """Send one email through Brevo and return its message id.
 
-    Raises MailError on any non-2xx — loudly, and WITHOUT the body that failed
-    to send, because the report carries purchase prices and margins.
+    Throws MailError if it doesn't get a 2xx back. The error leaves out the
+    email body since it has my prices and margins in it.
     """
     if not api_key:
         raise MailError("BREVO_API_KEY is not set")

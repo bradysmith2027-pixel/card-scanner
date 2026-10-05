@@ -1,52 +1,38 @@
 -- ============================================================
 -- 004_document_check_constraints.sql
--- Dreamboat Slabs — bring the repo in sync with CHECK constraints that
--- already exist in the live database but appear in NO migration file.
+-- Adds the CHECK constraints that were already on the live database but
+-- weren't in any migration file.
 --
--- WHY THIS EXISTS (2026-08-18 / 2026-08-19):
---   The first real save from the new confirm screen failed with Postgres
---   error 23514 (check_violation) on `cards_acquisition_source_check`.
---   `acquisition_source` had been built in the UI as a free-text "Bought
---   from" box, but the live DB restricts it to a fixed value set. Because
---   the INSERT is a single transaction, the ENTIRE card was rejected over
---   one optional field.
+-- The first card I tried to save from the new confirm screen failed with a
+-- Postgres 23514 error on cards_acquisition_source_check. The form had a free
+-- text "Bought from" box, but the database only allows a few set values. Since
+-- the whole insert is one transaction, the entire card got rejected because of
+-- one optional field.
 --
---   Root cause was not the constraint — it was that the constraint was
---   INVISIBLE. It was applied directly to the database (via the Supabase
---   UI / an ad-hoc statement) and never captured in version control, so
---   anyone reading `migrations/` would conclude these columns were free
---   text. This migration closes that gap.
+-- The real problem was that I didn't know the constraint existed. It was added
+-- straight in the Supabase dashboard and never saved in a migration, so looking
+-- at migrations/ you'd think these columns were free text. If I ever rebuilt
+-- the database from the migrations, it would accept stuff the real one doesn't.
 --
---   This matters more than it looks: before onboarding any outside seller,
---   the repo must be a truthful description of the schema. A rebuild from
---   migrations alone currently produces a DB that silently accepts data
---   the real one rejects.
---
--- VALUES (read from the live DB on 2026-08-19 via pg_get_constraintdef):
+-- Allowed values (pulled from the live database):
 --   acquisition_source: purchase, pull, trade, grading_return, other
 --   status:             in_hand, in_transit, at_grading, traded_away, sold
 --
--- SEMANTICS WORTH NOTING:
---   `acquisition_source` records HOW a card was acquired — not free-text
---   "where from." A store name, seller handle, or eBay URL does NOT belong
---   here; that's Notes (or a future dedicated column). See the Field
---   Dictionary.
+-- acquisition_source is HOW I got the card, not where from. A store name,
+-- seller or eBay link goes in Notes.
 --
---   Neither column is made NOT NULL here. In Postgres a CHECK that
---   evaluates to NULL passes, so NULL remains legal for both — this
---   migration deliberately reproduces the live behavior exactly rather
---   than tightening it.
+-- Neither column is made required here. A CHECK passes on NULL in Postgres, so
+-- NULL is still allowed for both, same as the live database.
 --
---   `category` is intentionally NOT constrained (verified 2026-08-19), so
---   the category dropdown in the confirm screen is free to add values.
+-- category has no constraint on purpose, so the category dropdown can add
+-- new values.
 --
--- IDEMPOTENT: each constraint is dropped IF EXISTS and re-added, so this is
--- safe to re-run. Re-adding revalidates existing rows; current data already
--- conforms, so it is a no-op against the live DB. Its real job is to make a
--- from-scratch rebuild correct.
+-- Safe to run more than once. Each constraint gets dropped and added back.
+-- The data already follows these rules, so on the live database it doesn't
+-- change anything. It's really for rebuilding from scratch.
 -- ============================================================
 
--- --- 1. acquisition_source: how the card was acquired ---
+-- --- 1. acquisition_source: how I got the card ---
 ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_acquisition_source_check;
 ALTER TABLE cards ADD CONSTRAINT cards_acquisition_source_check
   CHECK (acquisition_source = ANY (ARRAY[
@@ -57,8 +43,8 @@ ALTER TABLE cards ADD CONSTRAINT cards_acquisition_source_check
     'other'::text
   ]));
 
--- --- 2. status: where the card is in its lifecycle ---
--- Mirrors the pipeline: in_hand -> in_transit -> at_grading -> traded_away / sold
+-- --- 2. status: where the card is right now ---
+-- in_hand -> in_transit -> at_grading -> traded_away / sold
 ALTER TABLE cards DROP CONSTRAINT IF EXISTS cards_status_check;
 ALTER TABLE cards ADD CONSTRAINT cards_status_check
   CHECK (status = ANY (ARRAY[
@@ -70,12 +56,11 @@ ALTER TABLE cards ADD CONSTRAINT cards_status_check
   ]));
 
 -- ============================================================
--- NOT COVERED HERE — follow-up needed:
+-- Not covered here, still need to check:
 --
--- `demo_cards` was NOT audited for equivalent constraints. 003 treats it as
--- a faithful structural mirror of `cards`, so it likely needs the same two,
--- but that was not verified against the live DB and this migration does not
--- guess. To check, run:
+-- I didn't check demo_cards for the same constraints. 003 keeps it matching
+-- cards, so it probably needs the same two, but I haven't checked the live
+-- database so I'm not guessing. To check:
 --
 --   SELECT conrelid::regclass AS table_name, conname,
 --          pg_get_constraintdef(oid) AS definition
@@ -84,8 +69,7 @@ ALTER TABLE cards ADD CONSTRAINT cards_status_check
 --     AND contype = 'c'
 --   ORDER BY table_name, conname;
 --
--- The other four tables (grading_submissions, incoming_shipments, trades,
--- trade_items) were never audited for undocumented constraints either. The
--- same class of bug can be hiding in any of them. Widen the query above by
--- dropping the conrelid filter to sweep the whole public schema.
+-- I also never checked the other four tables (grading_submissions,
+-- incoming_shipments, trades, trade_items). Take out the conrelid filter
+-- above to check every table.
 -- ============================================================

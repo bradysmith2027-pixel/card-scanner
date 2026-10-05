@@ -1,17 +1,17 @@
 """
-conftest.py — shared fixtures for the fast unit suite (Q1).
+conftest.py
 
-Goal: exercise real endpoint/business logic with every external service mocked,
-so these tests run with NO network, NO database, and NO OpenAI spend.
+Shared fixtures for the unit tests.
 
-Provides:
-  - `auth`     : overrides the current_user dependency so requests are treated
-                 as an authenticated test user (skips real JWT/JWKS verification).
-  - `fake_db`  : patches supabase user_client() in the cards + export routers
-                 with an in-memory fake, and hands the test a knob to set the
-                 rows a query returns and inspect what got inserted.
+Everything outside the app is faked, so the tests run without the internet,
+the database, or spending anything on OpenAI.
 
-The slowapi rate limiter is disabled here so /scan tests don't 429.
+  - auth:    replaces current_user so every request counts as a logged in test
+             user (skips the real token check).
+  - fake_db: swaps user_client() for a fake in-memory one, so a test can set
+             what a query returns and check what got inserted.
+
+The rate limiter is turned off so the /scan tests don't get a 429.
 """
 
 import pytest
@@ -21,7 +21,7 @@ from app.main import app
 from app.auth import AuthedUser, current_user
 from app.rate_limit import limiter
 
-# No rate limiting during unit tests (otherwise repeated /scan calls could 429).
+# No rate limiting in tests, otherwise a bunch of /scan calls could get a 429.
 limiter.enabled = False
 
 TEST_USER_ID = "test-user-123"
@@ -29,7 +29,7 @@ TEST_USER_ID = "test-user-123"
 
 @pytest.fixture
 def auth():
-    """Treat every request as this authenticated user (bypasses JWT verify)."""
+    """Treat every request as this logged in user (skips the token check)."""
     app.dependency_overrides[current_user] = lambda: AuthedUser(
         id=TEST_USER_ID, token="fake-token"
     )
@@ -37,7 +37,7 @@ def auth():
     app.dependency_overrides.pop(current_user, None)
 
 
-# --- In-memory fake of the Supabase query builder --------------------------
+# --- Fake version of the Supabase query builder ----------------------------
 class _Resp:
     def __init__(self, data):
         self.data = data
@@ -58,7 +58,7 @@ class _Query:
     def insert(self, row):
         self._db.inserted = row
         result = self._db.insert_result
-        if result == "echo":  # default: DB echoes the row back with an id
+        if result == "echo":  # default: send the row back with an id like the DB would
             result = [{**row, "id": "generated-id"}]
         return _InsertQuery(result)
 
@@ -86,7 +86,7 @@ class _Client:
 
 
 class FakeDB:
-    """Test knobs: set `select_rows` / `insert_result`; read `inserted`, etc."""
+    """Set select_rows / insert_result before a test, then check inserted, etc."""
 
     def __init__(self):
         self.select_rows = []       # what a SELECT ... execute() returns

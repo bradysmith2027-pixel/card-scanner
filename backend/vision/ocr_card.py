@@ -1,39 +1,30 @@
 """
 ocr_card.py
 
-WHAT THIS SCRIPT DOES (plain English):
-  Give it a photo of the front of a card (and the back too, for Sports
-  cards -- Topps/Panini), plus which capture mode it is: "sports" or
-  "tcg". It finds the text regions with your trained model, crops them,
-  sends all the crops to GPT-4o in ONE request, and gets back the card's
-  year/set/number/player as structured data -- combining front and back
-  into a single answer per the project's locked-in merge rules (Step 4
-  Spec, Decision #5):
-    - If front and back agree on a field, that's one value (not doubled --
-      won't say "Ace Bailey Ace Bailey").
-    - If front and back disagree, the field is left blank in the main
-      result and flagged in "needs_review" instead of guessing which side
-      is right. The actual confirmation screen is Step 6 (not built yet)
-      -- for now this script just prints the conflict so you can see it.
-    - Variation/rarity is never asked for (Decision #4) -- that's a
-      separate user-driven dropdown step, not part of OCR.
+Reads a card from a photo.
 
-CARD TYPE (revised Decision #1, 2026-07-08):
-  You no longer have to know "topps" vs. "panini" up front. Just pick a
-  capture mode:
-    --capture-mode tcg     -> front-only, card_type is always "one_piece"
-                               (the only TCG supported today).
-    --capture-mode sports  -> front + back, card_type (topps vs. panini)
-                               is GUESSED from the set_logo crop via
-                               GPT-4o and used as a default.
-  The guess is just a default, not an authoritative value -- pass
-  --card-type topps/panini explicitly to skip the guess and force a
-  value (same manual-override safety net every other OCR field already
-  gets, per Risk #1). If the guess can't be made confidently (missing or
-  unreadable set_logo crop), the script stops and asks you to rerun with
-  --card-type set explicitly, rather than guessing blind.
+Give it a photo of the front of a card (and the back for sports cards, Topps
+and Panini) and say if it's "sports" or "tcg". It finds the text with my
+model, crops it, sends all the crops to GPT-4o in one request, and gets back
+the year, set, number and player. Then it combines the front and back into
+one answer:
+  - If the front and back match, it's just one value (it won't say
+    "Ace Bailey Ace Bailey").
+  - If they don't match, the field is left blank and flagged in
+    "needs_review" instead of guessing which side is right.
+  - It doesn't try to figure out the parallel. That gets picked separately.
 
-HOW TO RUN IT:
+Card type:
+  You don't have to know Topps vs Panini ahead of time. Just pick a mode:
+    --capture-mode tcg     -> front only, card_type is always "one_piece"
+                               (the only TCG it handles right now).
+    --capture-mode sports  -> front and back, and GPT-4o guesses Topps vs
+                               Panini from the set logo.
+  The guess is just a starting point. Pass --card-type topps or panini to
+  skip it. If it can't tell from the logo, it stops and asks you to run it
+  again with --card-type instead of just guessing.
+
+How to run it:
 
   Sports card (Topps/Panini), let it guess card_type from the logo:
     python ocr_card.py --capture-mode sports --front "..\\Topps\\topps_001_front.png" --back "..\\Topps\\topps_001_back.png"
@@ -41,12 +32,12 @@ HOW TO RUN IT:
   Sports card, but force the card_type instead of guessing:
     python ocr_card.py --capture-mode sports --card-type panini --front "..\\Panini\\panini_001_front.png" --back "..\\Panini\\panini_001_back.png"
 
-  TCG (One Piece, front only, per project spec):
+  TCG (One Piece, front only):
     python ocr_card.py --capture-mode tcg --front "..\\One Piece\\op_001_front.png"
 
-REQUIRES:
-  ROBOFLOW_API_KEY (same one you already set up for crop_card_regions.py)
-  OPENAI_API_KEY   (new -- see README.md for how to get one)
+Needs:
+  ROBOFLOW_API_KEY (same one crop_card_regions.py uses)
+  OPENAI_API_KEY   (see README.md for how to get one)
 """
 
 import argparse
@@ -57,49 +48,42 @@ import re
 import sys
 
 try:
-    # Normal case: imported as part of the `vision` package (the API does this).
+    # Normal case, imported as part of the vision package (the API does this).
     from . import card_vision
 except ImportError:
-    # Run directly as a CLI script, where there is no package context.
+    # Running it straight from the command line, where there's no package.
     import card_vision
 
-# One Piece cards only fill card_type, card_number, player_name -- no
-# year/set_name, per the project's Output Shape spec.
+# One Piece cards only have card_type, card_number and player_name. No year or
+# set_name.
 #
-# "serial" added 2026-09-16 with migration 010. Until then the prompt correctly
-# identified a serial and then returned null for it, because there was nowhere
-# to put it -- the read was right and the value was thrown away.
+# I added "serial" when I added the serial column (migration 010). Before that
+# GPT was reading the serial right but there was nowhere to save it.
 #
-# ⚠️ NOT added for one_piece. OP cards are not serial-numbered in the Topps /
-# Panini sense, the Output Shape spec fixes their fields at two, and the
-# 2026-09-15 evaluation measured One Piece at 10/10. Adding a field that is
-# almost always null to the one card type that currently reads perfectly is
-# pure downside. Revisit only if OP serials actually show up in inventory.
+# One Piece doesn't get a serial. Those cards aren't numbered like Topps and
+# Panini, and One Piece already reads 10/10 in my tests, so I don't want to
+# mess with it.
 #
-# ⚠️ DETECTOR MODE: there is no "serial" class in the Roboflow annotations, so
-# build_messages simply finds no crop for it and sends none -- the schema still
-# requires the key, and the model returns null. That is the honest outcome:
-# the detector path never could read serials (confirmed 2026-09-15), and this
-# makes that a visible null rather than a silent omission.
+# In detector mode there's no "serial" box in my Roboflow labels, so no crop
+# gets sent for it and it just comes back null. The detector could never read
+# serials anyway.
 FIELDS_BY_CARD_TYPE = {
     "topps": ["year", "set_name", "card_number", "serial", "player_name"],
     "panini": ["year", "set_name", "card_number", "serial", "player_name"],
     "one_piece": ["card_number", "player_name"],
 }
 
-# The sport/game, inferred from the image rather than read off it (2026-09-16).
+# The sport or game. GPT figures this out from what the card looks like, it
+# isn't printed text.
 #
-# WHY IT CAN BE DONE NOW: `category` is NOT NULL in the DB and the scanner
-# could never detect it, so the confirm screen has always forced a manual pick
-# and blocked submit until the user made one. That was correct while the
-# DETECTOR drove scanning — it only ever sent five cropped text regions, and
-# you cannot tell basketball from hockey from a crop of a card number.
-# Full-card mode (9/15) sends the whole card, so the sport is simply visible.
+# The detector couldn't do this since it only sent crops of the text, and you
+# can't tell basketball from hockey from a crop of a card number. So I always
+# had to pick it by hand. Full card mode sends the whole card, so the sport is
+# easy to see.
 #
-# ⚠️ These MUST stay identical to CATEGORIES in the frontend's cardOptions.ts.
-# `category` has no CHECK constraint (confirmed 8/18), so a bad value will NOT
-# fail the insert — it will be silently stored and quietly fragment every
-# per-category report. Unconstrained is more dangerous here, not less.
+# These have to match CATEGORIES in the frontend's cardOptions.ts exactly. The
+# category column doesn't have a CHECK constraint, so a wrong value would save
+# without an error and then mess up any report grouped by category.
 ALLOWED_CATEGORIES = [
     "basketball",
     "football",
@@ -111,13 +95,11 @@ ALLOWED_CATEGORIES = [
     "other",
 ]
 
-# Extra crops sent alongside the fields above purely as VISUAL CONTEXT --
-# not text to transcribe, and not their own output field. set_logo is the
-# set's visual logo mark (e.g. the Topps Chrome logo) -- it can help GPT-4o
-# confirm/recognize the set_name even when the printed text itself is
-# stylized, foil-glared, or otherwise hard to read cleanly. One Piece cards
-# were never annotated with a set_logo class, so there's nothing to add
-# there. This same set_logo crop also drives the card_type guess below.
+# Extra crops that get sent just to help, not to read text from. set_logo is
+# the set's logo (like the Topps Chrome logo). It helps GPT-4o figure out the
+# set_name when the text is hard to read from foil or glare. I never labeled a
+# set_logo on One Piece cards so there's nothing for those. The same logo crop
+# is also used to guess Topps vs Panini below.
 CONTEXT_CLASSES_BY_CARD_TYPE = {
     "topps": ["set_logo"],
     "panini": ["set_logo"],
@@ -161,9 +143,8 @@ extract the literal printed text for the fields listed.
 invent values.
 """
 
-# Used only for the card_type guess (revised Decision #1) -- a separate,
-# narrower GPT-4o call over just the set_logo crop, before the main
-# multi-field OCR call runs.
+# Only used to guess Topps vs Panini. It's a separate, smaller GPT-4o call on
+# just the logo crop, before the main call.
 CARD_TYPE_GUESS_SYSTEM_PROMPT = """You are looking at a cropped close-up photo of a \
 trading card's set logo mark (e.g. the Topps or Panini logo).
 
@@ -221,16 +202,14 @@ def parse_args():
 
 def resolve_card_type(args):
     """
-    Turns --capture-mode (+ optional --card-type override) into a starting
-    card_type and where it came from, per revised Decision #1:
-      - capture_mode "tcg"    -> always "one_piece" (source "fixed_tcg")
-      - capture_mode "sports" + explicit --card-type topps/panini
-                               -> that value (source "user_override")
-      - capture_mode "sports" with no override
-                               -> None for now (source "logo_guess"),
-                                  resolved later from the set_logo crop
-    Exits with an explanation if the combination doesn't make sense (e.g.
-    --back with --capture-mode tcg, which is front-only per project spec).
+    Uses --capture-mode (and --card-type if it was given) to get a starting
+    card_type and where it came from:
+      - "tcg"                       -> always "one_piece" (source "fixed_tcg")
+      - "sports" + --card-type      -> that value (source "user_override")
+      - "sports" with no card type  -> None for now (source "logo_guess"),
+                                       guessed later from the logo
+    Stops with an explanation if the options don't make sense, like passing
+    --back with tcg (One Piece is front only).
     """
     if args.capture_mode == "tcg":
         if args.back:
@@ -285,17 +264,13 @@ def gather_side_crops(model, image_path, side, card_type, confidence, save_dir):
 
 def guess_card_type_from_logo(client, logo_crop_img):
     """
-    Revised Decision #1: for Sports captures without an explicit
-    --card-type override, guess Topps vs. Panini from the set_logo crop
-    alone, in its own small GPT-4o call (separate from the main batched
-    OCR call, since it has to happen before we know which card_type to
-    build the main call's fields/schema around).
+    For sports cards where I didn't pick the brand, guess Topps vs Panini from
+    the logo crop. It's its own small GPT-4o call because it has to happen
+    before the main call, which needs to know the card type.
 
-    Returns "topps", "panini", or None if there's no logo crop to check
-    or GPT-4o isn't confident. This is meant to be a DEFAULT the user can
-    override, not an authoritative value -- the caller is responsible for
-    stopping and asking for a manual --card-type if this returns None,
-    same failure-handling pattern as every other OCR field (Risk #1).
+    Returns "topps", "panini", or None if there's no logo crop or GPT-4o isn't
+    sure. It's just a starting guess I can change. If it returns None, the
+    caller should stop and ask for --card-type.
     """
     if logo_crop_img is None:
         return None
@@ -329,9 +304,8 @@ def guess_card_type_from_logo(client, logo_crop_img):
     )
     raw = json.loads(response.choices[0].message.content)
     guess = raw.get("card_type")
-    # Belt-and-suspenders: only trust exactly "topps" or "panini". Anything
-    # else (null, a typo, an unexpected string) is treated as "not confident"
-    # rather than trusting it blindly.
+    # Only accept exactly "topps" or "panini". Anything else (null, a typo,
+    # something random) counts as not sure.
     return guess if guess in ("topps", "panini") else None
 
 
@@ -378,27 +352,22 @@ def build_messages(front_crops, back_crops, card_type):
     ]
 
 
-# --- FULL-CARD MODE (added 2026-09-15) ------------------------------------
+# --- FULL CARD MODE ------------------------------------------------------
 #
-# Reads the WHOLE card instead of detector-cropped fields. This exists because
-# every route back to self-hosted weights was blocked: hosted inference is out
-# of credits (402), raw weight export requires a paid Core plan, and retraining
-# YOLOv8n lands on Ultralytics' AGPL-3.0 -- rejected 2026-07-20 as "risky for a
-# commercial network app".
+# Reads the whole card instead of the cropped fields. I added this because I
+# couldn't keep using my detector without paying for Roboflow or the weights.
 #
-# It works because the detector never did the reading. Its only job was cropping
-# so OCR was easier; GPT-4o always did the identification, and everything
-# downstream (build_schema, merge_field, needs_review) operates on text, not on
-# boxes. Measured 2026-09-15 over 17 dataset cards: 45/50 fields populated,
-# 2/2 exact matches against the only known ground truth (OP01-024, OP03-102),
-# ~$0.005/card. Every miss was a front/back DISAGREEMENT that merge_field
-# correctly refused to resolve -- never a wrong value written silently -- and
-# those conflicts are downstream of detection, so the detector path hits them
-# identically.
+# It works because the detector never actually read anything. It just cropped
+# the fields so they were easier to read. GPT-4o always did the reading, and
+# everything after that (build_schema, merge_field, needs_review) only cares
+# about the text. When I tested it on 17 of my cards it filled in 45 of 50
+# fields for about half a cent a card. Every miss was the front and back not
+# matching, and merge_field flagged those instead of guessing. The detector
+# runs into the same thing.
 
-# Phone photos are far larger than the model needs, but shrinking too
-# aggressively is exactly what would destroy small print like a "44/99" serial.
-# 1600px matches the cap the hosted-detection path already used.
+# Phone photos are way bigger than needed, but shrinking them too much would
+# make small text like a "44/99" serial unreadable. 1600px is the same size the
+# hosted detector uses.
 FULLCARD_MAX_EDGE_PIXELS = 1600
 
 FULLCARD_SYSTEM_PROMPT = """You are reading printed text off photographs of a complete \
@@ -481,7 +450,7 @@ do not guess.
 
 
 def encode_full_image(image_bgr, max_edge=FULLCARD_MAX_EDGE_PIXELS):
-    """Base64-encode a whole-card photo, downscaled to a sane upload size."""
+    """Shrink the card photo to a normal size and base64 encode it."""
     import cv2
 
     h, w = image_bgr.shape[:2]
@@ -494,10 +463,10 @@ def encode_full_image(image_bgr, max_edge=FULLCARD_MAX_EDGE_PIXELS):
 
 
 def build_fullcard_messages(front_image, back_image, card_type):
-    """Same contract as build_messages, but from whole-card photos.
+    """Same as build_messages, but with the whole card photos.
 
-    Returns the identical message shape, so build_schema / merge_field and the
-    rest of the pipeline are untouched.
+    Returns the same shape, so build_schema, merge_field and everything after
+    it work the same.
     """
     fields = FIELDS_BY_CARD_TYPE[card_type]
     intro = (
@@ -514,9 +483,9 @@ def build_fullcard_messages(front_image, back_image, card_type):
             "type": "image_url",
             "image_url": {
                 "url": f"data:image/jpeg;base64,{encode_full_image(image)}",
-                # "high" forces full tiling instead of one downsampled thumbnail.
-                # Without it, small print (card numbers, serials) is not
-                # resolvable and reads would fail for the wrong reason.
+                # "high" makes GPT look at the full detail instead of a small
+                # thumbnail. Without it, small text like card numbers and
+                # serials can't be read.
                 "detail": "high",
             },
         })
@@ -527,13 +496,13 @@ def build_fullcard_messages(front_image, back_image, card_type):
 
 
 def guess_card_type_from_card(client, front_image):
-    """Topps vs. Panini from the whole front, with no detector.
+    """Guess Topps vs Panini from the whole front, no detector.
 
-    Replaces guess_card_type_from_logo in full-card mode, which needed a
-    set_logo crop that only a detector could produce. Same contract: returns
-    "topps", "panini", or None, and None means "ask the user" rather than
-    "pick one" -- the 2026-07-08 Panini-reads-as-Topps bug came from defaulting
-    blind, and that lesson holds regardless of how the image is framed.
+    This replaces guess_card_type_from_logo in full card mode, since that one
+    needs a logo crop from the detector. Works the same way: returns "topps",
+    "panini", or None, and None means ask me instead of picking one. Back in
+    July a Panini card got read as Topps because it just defaulted, so it
+    shouldn't guess blind.
     """
     if front_image is None:
         return None
@@ -588,37 +557,33 @@ def build_schema(card_type):
         "strict": True,
         "schema": {
             "type": "object",
-            # `category` sits at the TOP LEVEL, deliberately not inside
-            # front/back (added 2026-09-16).
+            # category is at the top level on purpose, not inside front/back.
             #
-            # Every other field is printed text, so it has a front reading and a
-            # back reading and `merge_field` reconciles them. The sport is not
-            # printed text — it is a judgement about the whole object, and one
-            # physical card has exactly one sport. Putting it per-side would
-            # invent a disagreement that cannot exist and send it to manual
-            # review for no reason.
+            # Every other field is printed text, so there's a front reading and
+            # a back reading and merge_field combines them. The sport isn't
+            # printed, it's about the whole card, and a card only has one sport.
+            # If it was per side, the two sides could "disagree" and get flagged
+            # for no reason.
             #
-            # It rides along in the SAME call, so it costs nothing extra. A
-            # second request (the way brand detection works in
-            # guess_card_type_from_card) would double the per-scan price.
+            # It's part of the same call so it doesn't cost anything extra. A
+            # second call like the brand guess would double the cost per scan.
             "properties": {
                 "front": side_schema(),
                 "back": side_schema(),
                 "category": {"type": ["string", "null"]},
-                # `parallel` + `parallel_confidence` (2026-09-16). Also whole-
-                # card, for the same reason as category.
+                # parallel and parallel_confidence. Also for the whole card, same
+                # reason as category.
                 #
-                # The confidence is NOT a subjective score — the prompt defines
-                # it objectively: "high" means the parallel's name is PRINTED on
-                # the card, "low" means it was inferred from foil, colour or
-                # pattern. That is a question a model can answer reliably,
-                # unlike "how sure are you?", and it maps straight onto whether
-                # the value can be trusted without a human looking.
+                # The confidence isn't just "how sure are you". The prompt
+                # defines it: "high" means the parallel name is printed on the
+                # card, "low" means GPT guessed from the foil, color or pattern.
+                # That's something it can actually answer, and it tells me if I
+                # need to double check it.
                 "parallel": {"type": ["string", "null"]},
                 "parallel_confidence": {"type": ["string", "null"]},
             },
-            # strict mode requires every property to be listed here, including
-            # the nullable ones.
+            # strict mode needs every field listed here, even the ones that can
+            # be null.
             "required": [
                 "front",
                 "back",
@@ -640,32 +605,26 @@ def normalize(value):
 
 def _tokens(value):
     """
-    The lowercased alphanumeric "words" in a reading, as a set. Used to
-    tell whether two readings describe the same thing worded differently
-    (e.g. "Prizm" vs "2025 Panini - Prizm Football", or "No. 338" vs
-    "338"). Punctuation, spacing, the em-dash, and word order all drop
-    out -- only the actual words matter for the comparison.
+    The lowercase words in a reading, as a set. Used to tell if two readings
+    are the same thing written differently (like "Prizm" vs "2025 Panini -
+    Prizm Football", or "No. 338" vs "338"). Punctuation, spaces and word
+    order get ignored, only the actual words matter.
     """
     return set(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
 def merge_field(front_val, back_val):
     """
-    Decision #5's merge rule, made smarter about COMPATIBLE readings so we
-    stop flagging non-conflicts:
-      - Exact (case-insensitive) match  -> one value, no review.
-      - One reading's words are a subset of the other's -> they're the
-        SAME THING, one side just read more of the label than the other
-        (e.g. front "Prizm" vs back "2025 Panini - Prizm Football", or a
-        glare-clipped "44" vs the full "44/99"). Not a conflict. Keep the
-        more complete reading (the one with more words) -- it never loses
-        information, and it's the right call for partial reads like the
-        card_number example above. Ties (same words, different order) keep
-        the front.
-      - Genuinely different words on each side (e.g. "Prizm" vs "Mosaic",
-        or "44" vs "45") -> still a real conflict. NOT auto-resolved --
-        return None plus both candidates so the caller flags it for manual
-        review, exactly as before.
+    Combines the front and back reading for one field:
+      - Same reading (ignoring caps) -> one value, nothing flagged.
+      - One reading's words are all in the other -> same thing, one side
+        just read more of it (like "Prizm" vs "2025 Panini - Prizm Football",
+        or "44" cut off by glare vs "44/99"). Not a conflict. Keep the longer
+        one so nothing gets lost. If they're the same words in a different
+        order, keep the front.
+      - Actually different words (like "Prizm" vs "Mosaic", or "44" vs "45")
+        -> a real conflict. Doesn't pick one. Returns None plus both readings
+        so it gets flagged for me to check.
     """
     f = normalize(front_val)
     b = normalize(back_val)
@@ -676,10 +635,9 @@ def merge_field(front_val, back_val):
         return f, None
 
     ft, bt = _tokens(f), _tokens(b)
-    # Only treat as compatible when both sides actually have words AND one
-    # word-set contains the other. If a reading is all punctuation (no
-    # tokens), or each side has words the other lacks, fall through to the
-    # real-conflict path rather than silently merging.
+    # Only count them as matching if both sides have words and one side's
+    # words are all in the other. If one is just punctuation, or each side has
+    # words the other doesn't, treat it as a real conflict.
     if ft and bt and (ft <= bt or bt <= ft):
         return (b if len(bt) > len(ft) else f), None
 
@@ -728,8 +686,8 @@ def main():
     client = OpenAI(api_key=openai_key)
 
     if card_type is None:
-        # Sports capture, no explicit override -- guess topps vs. panini
-        # from the set_logo crop (revised Decision #1).
+        # Sports card with no brand picked, so guess Topps vs Panini from
+        # the logo.
         print("Guessing card_type from the set_logo crop ...")
         guessed = guess_card_type_from_logo(client, front_crops.get("set_logo"))
         if guessed is None:

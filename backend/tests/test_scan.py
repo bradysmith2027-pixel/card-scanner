@@ -1,8 +1,11 @@
 """
-test_scan.py — offline tests for POST /scan (no model/GPT-4o calls).
+test_scan.py
 
-The auth gate and validation short-circuit before any Roboflow/OpenAI work, so
-these run without network or spend. Full pipeline is covered by the live check.
+Offline tests for POST /scan. No model or GPT-4o calls.
+
+The login check and file checks happen before Roboflow or OpenAI, so these
+don't need the internet or cost anything. The live check script tests the full
+scan.
 """
 
 import pytest
@@ -18,7 +21,7 @@ _TINY = ("f.jpg", b"not-a-real-image", "image/jpeg")
 
 
 def test_scan_requires_auth():
-    # Valid-looking multipart, no token -> 401 before any scan work.
+    # Normal looking upload but no token -> 401 before anything runs.
     resp = client.post(
         "/scan",
         files={"front": _TINY},

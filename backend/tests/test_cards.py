@@ -1,9 +1,11 @@
 """
-test_cards.py — endpoint tests that don't require a live DB or real token.
+test_cards.py
 
-Auth-gate and wiring checks run offline: the 401 path short-circuits in the
-current_user dependency before any Supabase call. DB-backed behavior (RLS
-isolation, real rows) needs an integration test with a real JWT — added later.
+Endpoint tests that don't need the real database or a real login.
+
+These check that you get a 401 without logging in. That happens before any
+Supabase call, so it works offline. Testing RLS with real rows needs a real
+token, which is what the live_ scripts are for.
 """
 
 import pytest
@@ -33,7 +35,7 @@ def test_list_cards_rejects_garbage_token():
     assert resp.status_code == 401
 
 
-# --- POST /cards auth gate (valid body so only auth is under test) ---------
+# --- POST /cards login check (the body is valid so only login is tested) ---
 _VALID_BODY = {"player": "X", "year": "2024", "set_name": "Topps", "category": "Basketball"}
 
 

@@ -1,29 +1,20 @@
 """
 crop_card_regions.py
 
-WHAT THIS SCRIPT DOES (plain English):
-  You give it a card photo (or a folder of card photos). It asks your
-  trained model to find the boxes on the card (year, set name, set logo,
-  card number, player name) and saves each box as its own small picture.
+Give it a card photo (or a folder of them). My model finds the boxes on the
+card (year, set name, set logo, card number, player name) and it saves each
+box as its own small picture.
 
-  This is a "check before you build" step. Before we hook this up to GPT-4o
-  to read the text, we want to LOOK at the cropped pictures ourselves and
-  confirm they're clean and readable. If a crop is blurry, cut off, or
-  includes the wrong area, GPT-4o won't be able to read it either -- better
-  to catch that now.
+I used this to check the crops before hooking them up to GPT-4o. If a crop is
+blurry, cut off, or grabbing the wrong spot, GPT-4o won't be able to read it
+either, so I wanted to see them first.
 
-WHY THIS VERSION IS DIFFERENT FROM A "NORMAL" YOLO SCRIPT:
-  Roboflow's Public (free) plan does not allow manually exporting the raw
-  .pt weights file. Instead, this script uses Roboflow's free "inference"
-  package, which loads your model by its model ID (using your API key) and
-  downloads/caches the weights automatically behind the scenes the first
-  time it runs. After that first run, it works offline. This is still
-  "self-hosted" -- it runs on your machine, not billed per call -- it just
-  doesn't hand you a loose .pt file to manage yourself. This same
-  model-loading approach can be dropped directly into the FastAPI backend
-  later (Step 5) with no separate server needed.
+The free Roboflow plan doesn't let you download the .pt weights file, so this
+uses Roboflow's inference package instead. It loads the model by its ID (with
+my API key) and downloads the weights the first time it runs. After that it
+works offline and runs on my machine, so it doesn't cost anything per scan.
 
-HOW TO RUN IT (see README.md for full plain-English instructions):
+How to run it (more in README.md):
 
   One photo:
     python crop_card_regions.py --image test_card.jpg
@@ -31,13 +22,12 @@ HOW TO RUN IT (see README.md for full plain-English instructions):
   A whole folder of photos:
     python crop_card_regions.py --images-dir ./test_photos
 
-  Output goes to a new "crops_output" folder by default. Each cropped
-  image is named so you know which photo and which field it came from:
+  Everything goes in a "crops_output" folder. Each crop is named by the photo
+  and the field it came from:
     crops_output/crops/player_name/test_card_player_name_0.jpg
 
-  It also saves a copy of the original photo with boxes drawn on it
-  (in an "annotated" folder) so you can see what the model detected at a
-  glance, without opening every single crop.
+  It also saves the original photo with the boxes drawn on it (in an
+  "annotated" folder) so I can see what it found without opening every crop.
 """
 
 import argparse
@@ -45,18 +35,17 @@ import os
 import sys
 from pathlib import Path
 
-# Your trained model, as shown in the Roboflow dashboard.
+# My trained model, from the Roboflow dashboard.
 DEFAULT_MODEL_ID = "bradys-workspace-wqkgm/dreamboat-slabs-1-yolov8n-t1"
 
-# One-piece cards only ever get these two fields per the project spec.
+# One Piece cards only have these two fields.
 ONE_PIECE_ALLOWED_CLASSES = {"player_name", "card_number"}
 
-# Small buffer added around every detected box before cropping, so text
-# right at the edge of a box doesn't get sliced off. Tweak if crops look
-# too tight or too loose.
+# A little extra space around each box before cropping so text on the edge
+# doesn't get cut off. Change it if the crops look too tight or too loose.
 PADDING_PIXELS = 6
 
-# Colors (BGR) used to draw boxes on the annotated preview image.
+# Colors (BGR) for the boxes on the annotated photo.
 BOX_COLOR = (60, 200, 60)
 TEXT_COLOR = (255, 255, 255)
 
@@ -122,11 +111,10 @@ def get_image_paths(args):
 
 def _field(obj, *names):
     """
-    Pull a field off a prediction whether it comes back as an object with
-    attributes (e.g. prediction.x) or a plain dict (e.g. prediction["x"]).
-    Tries each name in `names` in order and returns the first one found.
-    Different versions of Roboflow's `inference` package have returned
-    predictions both ways, so this keeps the script working either way.
+    Get a value off a prediction whether it's an object (prediction.x) or a
+    dict (prediction["x"]). Tries each name in names and returns the first one
+    it finds. Different versions of the inference package return it different
+    ways, so this handles both.
     """
     for name in names:
         if hasattr(obj, name):
@@ -138,12 +126,12 @@ def _field(obj, *names):
 
 def get_predictions(results):
     """
-    Normalize the output of model.infer(image)[0] into a plain list of
-    prediction objects/dicts, regardless of exact SDK version shape.
+    Turn whatever model.infer(image)[0] returns into a plain list of
+    predictions, no matter which package version it is.
     """
     predictions = _field(results, "predictions")
     if predictions is None:
-        # Some versions return the dict itself with no wrapping object.
+        # Some versions just return the dict by itself.
         predictions = results.get("predictions", []) if isinstance(results, dict) else []
     return predictions
 
@@ -232,14 +220,13 @@ def main():
             print("  No fields detected. Try lowering --confidence or check the photo quality.")
             continue
 
-        # Save an annotated preview (original photo with boxes drawn on it)
-        # so it's easy to eyeball detections without opening every crop.
+        # Save the photo with the boxes drawn on it so I can check it quickly.
         annotated_image = draw_annotated_preview(image, predictions)
         annotated_path = annotated_dir / f"{image_path.stem}_annotated.jpg"
         cv2.imwrite(str(annotated_path), annotated_image)
 
-        # Per-image counter so repeated detections of the same field
-        # (e.g. two boxes both called "card_number") get unique filenames.
+        # Counter for each photo so if the same field shows up twice (like two
+        # "card_number" boxes) the files don't overwrite each other.
         seen_counts = {}
 
         for pred in predictions:
@@ -255,8 +242,8 @@ def main():
             if args.card_type == "one_piece" and class_name not in ONE_PIECE_ALLOWED_CLASSES:
                 continue
 
-            # x/y from Roboflow are the CENTER of the box, not a corner --
-            # convert to a top-left/bottom-right box before cropping.
+            # Roboflow's x/y is the center of the box, not a corner, so change it
+            # to top-left and bottom-right before cropping.
             x1 = max(0, int(cx - w / 2) - PADDING_PIXELS)
             y1 = max(0, int(cy - h / 2) - PADDING_PIXELS)
             x2 = min(img_width, int(cx + w / 2) + PADDING_PIXELS)

@@ -1,27 +1,22 @@
 """
-lots.py — record a bundle buy and spread its cost across the cards inside.
+lots.py
 
-WHY THIS EXISTS (2026-09-14)
-    Brady's most profitable channel is Discord lots (39% ROI vs 5.7% on single
-    cards bought near comp), and until now the app could not record one. Every
-    lot card got a hand-guessed basis, which makes per-card ROI — the number
-    the T1 tranche gates read — meaningless in exactly the lane that matters
-    most.
+Saves a lot purchase and splits the cost across the cards in it.
 
-    `app.lot_basis` owns the allocation the same way `app.profit` owns profit.
-    This router does no arithmetic.
+Lots have been my best ROI (around 39% vs about 6% on single cards), and before
+this I couldn't log one properly. I was just guessing a cost for each card.
 
-THE SHAPE OF A REAL LOT ENTRY
-    Brady buys 50 cards for $200, enters the 4 worth tracking, and boxes the
-    rest. `bulk_remainder_value` is his estimate of what those un-entered
-    cards are worth in total; it absorbs its proportional share of the cost so
-    the 4 entered cards are not overcharged for the whole lot.
+The math is all in app.lot_basis. This file just saves things.
 
-⚠️ TRANSACTIONALITY
-    Same constraint as trades: PostgREST offers no cross-table transaction.
-    Order is lot -> cards, so a mid-flight failure leaves a lot with fewer
-    cards than intended (visible and fixable) rather than cards with no lot
-    (invisible). The balance-check query in migration 009 finds any such lot.
+How I actually enter a lot: I buy 50 cards for $200, enter the 4 worth
+tracking, and box the rest. bulk_remainder_value is my guess at what the rest
+are worth together. It takes its share of the cost so the 4 cards I entered
+don't get charged for the whole lot.
+
+Supabase's API can't do one transaction across tables, so I save the lot first
+and then the cards. If something fails partway, I end up with a lot that's
+missing some cards (easy to spot and fix) instead of cards that aren't
+connected to any lot. The check query in migration 009 finds those.
 """
 
 import logging
@@ -50,10 +45,10 @@ LotSource = Literal[
 
 
 class LotCardIn(CardCreate):
-    """A card being entered individually from the lot.
+    """A card from the lot that I'm entering on its own.
 
-    Inherits CardCreate so a lot card is a first-class card. `purchase_price`
-    is IGNORED if sent — the whole point is that the allocator decides it.
+    It uses CardCreate so it's a normal card. If purchase_price gets sent it's
+    ignored, since the split decides it.
     """
 
     est_value: Optional[Money] = None
@@ -61,9 +56,9 @@ class LotCardIn(CardCreate):
 
 class LotCreate(BaseModel):
     purchase_date: date
-    # ⚠️ The lot PRICE only. Shipping/tax/other are separate, matching the
-    # card-level convention from migration 007. Entering an all-in number
-    # here double-counts, silently.
+    # Just the price of the lot. Shipping, tax and other costs have their own
+    # fields, same as for single cards. Putting the all-in number here would
+    # count them twice.
     total_cost: Money
     cards: list[LotCardIn] = Field(min_length=1)
 
@@ -92,8 +87,8 @@ def create_lot(
     payload: LotCreate,
     user: AuthedUser = Depends(current_user),
 ) -> LotResult:
-    """Record a lot purchase and create its cards with allocated cost basis."""
-    # --- compute first; nothing is written until the math succeeds ---------
+    """Save a lot and create its cards with their share of the cost."""
+    # --- do the math first, nothing gets saved unless it works ------------
     try:
         result = lot_basis.allocate_lot_basis(
             lot=payload.model_dump(mode="json"),
@@ -110,9 +105,9 @@ def create_lot(
 
     warnings = list(result.warnings)
 
-    # A stated card_count that exceeds what was entered, with no bulk value,
-    # means the un-entered cards are silently absorbing nothing — so the
-    # entered ones are carrying their cost. Worth saying out loud.
+    # If the lot has more cards than I entered and there's no bulk value, the
+    # cards I didn't enter aren't taking any of the cost, so the ones I did
+    # enter are carrying all of it. Worth a warning.
     if (
         payload.card_count
         and payload.card_count > len(payload.cards)
@@ -149,15 +144,15 @@ def create_lot(
         row = incoming.model_dump(mode="json", exclude={"est_value"})
         row["user_id"] = user.id
         row["lot_id"] = lot_id
-        # The allocated share IS the purchase price. Writing it here means
-        # every existing profit surface works on a lot card unchanged.
+        # The card's share of the lot becomes its purchase price, so all the
+        # profit stuff works on lot cards without any changes.
         row["purchase_price"] = str(result.allocations[str(i)])
         row["purchase_date"] = payload.purchase_date.isoformat()
         row.setdefault("acquisition_source", None)
         if not row.get("acquisition_source"):
             row["acquisition_source"] = "purchase"
-        # Lot-level costs are already inside the allocated basis. Leaving
-        # per-card shipping/tax populated here would double-count them.
+        # The lot's shipping and tax are already in the split, so they get
+        # cleared here or they'd be counted twice.
         row["shipping_in"] = None
         row["purchase_tax"] = None
         created.append(

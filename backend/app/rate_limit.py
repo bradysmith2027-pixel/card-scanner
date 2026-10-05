@@ -1,13 +1,13 @@
 """
-rate_limit.py — shared slowapi limiter.
+rate_limit.py
 
-The scan endpoint is the cost-abuse surface (each scan can trigger a paid
-GPT-4o call), so it's rate-limited PER USER. The key function pulls the user
-id (JWT `sub`) from the bearer token so the limit follows the account, not the
-IP. Signature verification is intentionally skipped HERE — this only picks a
-bucket key; the endpoint's current_user dependency still fully verifies the
-token, so a forged token gets rejected regardless of which bucket it lands in.
-Falls back to client IP when there's no usable token.
+The rate limiter for /scan. Every scan calls GPT-4o, which costs money, so I
+limit it per user.
+
+The limit goes by the user id in the token, not the IP address. I don't check
+the token's signature here because this is only deciding which bucket to count
+the request in. current_user still checks the token for real, so a fake token
+gets rejected anyway. If there's no token it uses the IP instead.
 """
 
 import jwt
@@ -28,8 +28,7 @@ def user_or_ip_key(request) -> str:
     return f"ip:{get_remote_address(request)}"
 
 
-# config_filename points at a deliberately non-existent file: slowapi otherwise
-# auto-reads ".env" via starlette Config using the OS default codec (cp1252 on
-# Windows), which chokes on our UTF-8 .env. We don't use slowapi's env config,
-# and a missing file is simply skipped — so this sidesteps the decode crash.
+# config_filename points at a file that doesn't exist on purpose. Otherwise
+# slowapi tries to read .env on its own, and on Windows it reads it with the
+# wrong encoding and crashes. I don't need slowapi's config anyway.
 limiter = Limiter(key_func=user_or_ip_key, config_filename="_slowapi_no_env")

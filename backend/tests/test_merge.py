@@ -1,13 +1,13 @@
 """
-test_merge.py — unit tests for the front/back OCR merge logic in ocr_card.py.
+test_merge.py
 
-merge_field decides, per field, whether the front and back readings agree,
-are compatible (one is a fuller version of the other), or genuinely conflict
-(needs manual review). Pure functions — no network, no model. This is the
-correctness surface behind "is this the same card read two ways, or a real
-disagreement?"
+Tests for how ocr_card.py combines the front and back readings.
 
-ocr_card lives in backend/vision/, same as how scan_service imports it.
+For each field, merge_field decides if the front and back match, if one is
+just a longer version of the other, or if they actually disagree (and need me
+to check). No network or model needed.
+
+ocr_card is in backend/vision/, same as how scan_service imports it.
 """
 
 import pytest
@@ -17,7 +17,7 @@ from vision import ocr_card
 pytestmark = pytest.mark.unit
 
 
-# --- merge_field: agreement / compatibility ---------------------------------
+# --- merge_field: matching readings ----------------------------------------
 def test_exact_match_no_conflict():
     assert ocr_card.merge_field("Prizm", "Prizm") == ("Prizm", None)
 
@@ -28,7 +28,7 @@ def test_case_insensitive_match():
 
 
 def test_subset_keeps_fuller_reading():
-    # front read part of the label; back read the whole thing -> not a conflict.
+    # front read part of it, back read all of it -> not a conflict.
     value, conflict = ocr_card.merge_field("Prizm", "2025 Panini - Prizm Football")
     assert conflict is None
     assert value == "2025 Panini - Prizm Football"
@@ -40,12 +40,12 @@ def test_partial_card_number_keeps_complete():
 
 
 def test_tie_keeps_front():
-    # same words, different order -> tie -> front wins.
+    # same words in a different order -> tie -> front wins.
     value, conflict = ocr_card.merge_field("Panini Prizm", "Prizm Panini")
     assert conflict is None and value == "Panini Prizm"
 
 
-# --- merge_field: genuine conflicts -----------------------------------------
+# --- merge_field: real conflicts --------------------------------------------
 def test_different_words_conflict():
     value, conflict = ocr_card.merge_field("Prizm", "Mosaic")
     assert value is None

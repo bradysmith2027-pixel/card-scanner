@@ -1,13 +1,11 @@
-"""test_reports.py — the Weekly Ops report generator.
+"""test_reports.py
 
-The report is pure input -> output, so it has no excuse for being untested.
+Tests for the Weekly Ops report.
 
-The most important test in this file is the NON-VACUOUS CONTROL
-(`test_fee_gap_changes_the_report`): a fixture where a fee is missing must
-produce a *different* report than one where it is not. The profit bug survived
-for months because the old test asserted `250 - 100 == 150`, which still passes
-under the correct code — every fixture omitted fees, so gross equalled net and
-the assertion could not tell the two apart. Same trap, different module.
+The most important one is test_fee_gap_changes_the_report. A sale with a
+missing fee has to give a different report than one with the fee. My profit bug
+lasted months because the old test checked 250 - 100 == 150, which passes with
+or without fees since none of the test data had fees. Don't want that again.
 """
 
 from datetime import date
@@ -23,7 +21,7 @@ TODAY = date(2026, 9, 28)
 
 
 def card(**over):
-    """A sane in-hand card. Override only what a test is about."""
+    """A normal in-hand card. Each test only changes what it's testing."""
     base = {
         "id": "c1",
         "player": "Test Player",
@@ -44,11 +42,11 @@ def card(**over):
 
 
 def sold(**over):
-    """The exact scenario verified against the live database on 2026-09-13.
+    """The same card I checked against the real database.
 
-    $100 card + $13 other costs = $113 all-in. Sold $200, $26 fees, $5 shipped
-    out, $6 shipping collected -> net proceeds $175 -> +$62.00 net profit.
-    The old gross code reported +$100.00 on this same row.
+    $100 card + $13 other costs = $113 all in. Sold for $200, $26 fees, $5 to
+    ship, $6 shipping paid by the buyer -> $175 in -> +$62.00 profit.
+    The old code said +$100.00 for this card.
     """
     base = card(
         status="sold",
@@ -65,26 +63,26 @@ def sold(**over):
 
 
 # --------------------------------------------------------------------------
-# Window arithmetic
+# Report dates
 # --------------------------------------------------------------------------
 def test_window_is_half_open_so_nothing_is_double_counted():
     start, end = reports.week_bounds(TODAY)
     assert start == date(2026, 9, 21)
     assert end == TODAY
 
-    # start is INCLUSIVE — a sale on the first day is in this report.
+    # start counts, so a sale on the first day is in this report.
     r = reports.build_weekly([sold(sale_date="2026-09-21")], today=TODAY)
     assert len(r.sales) == 1
 
-    # the day before start belongs to the PREVIOUS report.
+    # the day before start goes in last week's report.
     r = reports.build_weekly([sold(sale_date="2026-09-20")], today=TODAY)
     assert r.sales == []
 
-    # end is EXCLUSIVE — a sale closed later today lands in NEXT week's report.
+    # end doesn't count, so a sale later today goes in next week's report.
     r = reports.build_weekly([sold(sale_date="2026-09-28")], today=TODAY)
     assert r.sales == []
 
-    # and the two windows tile: that same sale is picked up a week later.
+    # and it does show up in next week's report, so nothing gets missed.
     r = reports.build_weekly(
         [sold(sale_date="2026-09-28")], today=date(2026, 10, 5)
     )
@@ -92,24 +90,23 @@ def test_window_is_half_open_so_nothing_is_double_counted():
 
 
 # --------------------------------------------------------------------------
-# The report never does its own profit math
+# The report doesn't do its own profit math
 # --------------------------------------------------------------------------
 def test_realized_profit_is_net_not_gross():
-    """$100 all-in, $200 sale, $26 fees, $5 ship out, $6 collected -> +$62.
+    """$100 all in, $200 sale, $26 fees, $5 to ship, $6 collected -> +$62.
 
-    If this ever reads 100.00 the report has started computing gross profit,
-    which is the exact bug that cost this project two and a half months of
-    wrong numbers.
+    If this ever says 100.00, the report is doing profit without fees again,
+    which is the bug that gave me wrong numbers for months.
     """
     r = reports.build_weekly([sold()], today=TODAY)
     assert r.realized_profit == Decimal("62.00")
 
 
 # --------------------------------------------------------------------------
-# 🔴 THE NON-VACUOUS CONTROL
+# Make sure a missing fee actually changes the report
 # --------------------------------------------------------------------------
 def test_fee_gap_changes_the_report():
-    """A missing fee must make the report DIFFERENT, not just differently worded."""
+    """A missing fee should actually change the report, not just the wording."""
     with_fee = reports.build_weekly(
         [sold(sale_channel="ebay", platform_fees="26")], today=TODAY
     )
@@ -119,7 +116,7 @@ def test_fee_gap_changes_the_report():
 
     assert with_fee.fee_gaps == []
     assert len(without_fee.fee_gaps) == 1
-    # and the money moves too, not just the warning list
+    # and the money changes too, not just the warnings
     assert without_fee.realized_profit != with_fee.realized_profit
     assert reports.render_text(without_fee) != reports.render_text(with_fee)
     assert "FEES MISSING" in reports.render_text(without_fee)
@@ -127,11 +124,10 @@ def test_fee_gap_changes_the_report():
 
 
 def test_zero_fee_on_a_cash_channel_is_not_a_gap():
-    """The 2026-09-17 finding, encoded.
+    """From when I imported my spreadsheet.
 
-    Blank fees were a FALSE ALARM on 22 of 23 rows — a cash or in-person sale
-    legitimately carries no platform fee. Flagging every zero is how a weekly
-    report becomes noise and stops being read.
+    22 of 23 sales with a $0 fee were fine, because cash and in person sales
+    don't have fees. If every $0 got flagged I'd just start ignoring the report.
     """
     for channel in ("show", "discord", "facebook", "instagram"):
         r = reports.build_weekly(
@@ -141,7 +137,7 @@ def test_zero_fee_on_a_cash_channel_is_not_a_gap():
 
 
 def test_missing_channel_is_not_flagged():
-    """No channel recorded is not evidence of a missing fee."""
+    """No sale channel entered doesn't mean the fee is missing."""
     r = reports.build_weekly([sold(sale_channel=None, platform_fees="0")], today=TODAY)
     assert r.fee_gaps == []
 
@@ -150,7 +146,7 @@ def test_missing_channel_is_not_flagged():
 # Aging
 # --------------------------------------------------------------------------
 def test_aging_reports_only_the_week_a_threshold_is_crossed():
-    """A card 200 days old must not appear in the 90-day list every single week."""
+    """A 200 day old card shouldn't show up in the 90 day list every single week."""
     just_crossed = card(id="new90", purchase_date="2026-06-29")  # 91 days
     long_past = card(id="old", purchase_date="2026-01-01")  # ~270 days
 
@@ -169,7 +165,7 @@ def test_sold_cards_do_not_age():
 
 
 # --------------------------------------------------------------------------
-# Capital in flight
+# Money tied up in transit or at grading
 # --------------------------------------------------------------------------
 def test_in_transit_dollars_are_summed():
     r = reports.build_weekly(
@@ -185,7 +181,7 @@ def test_in_transit_dollars_are_summed():
 
 
 # --------------------------------------------------------------------------
-# Honesty rules
+# Don't show numbers that can't be calculated
 # --------------------------------------------------------------------------
 def test_quiet_week_still_produces_a_report():
     r = reports.build_weekly([], today=TODAY)
@@ -195,20 +191,18 @@ def test_quiet_week_still_produces_a_report():
 
 
 def test_weekly_report_never_claims_a_capital_position():
-    """The weekly has no capital section, so it must not imply one.
+    """The weekly doesn't have a capital section, so it shouldn't show a capital number.
 
-    The standing "NOT AVAILABLE" disclaimer was removed from the weekly on
-    2026-09-30 (Brady's call) because it never changed and so taught the reader
-    to skip the footer. The rule it protected still holds and is asserted here
-    from the other direction: the weekly must not print a capital figure at all.
-    `CAPITAL_UNAVAILABLE` survives for the MONTHLY report, which does have that
-    section and must print it rather than substituting cost-of-inventory.
+    I took the "NOT AVAILABLE" note off the weekly because it said the same thing
+    every week and I'd stop reading it. But the weekly still shouldn't show any
+    capital number. CAPITAL_UNAVAILABLE is still there for the monthly report,
+    which does have a capital section.
     """
     r = reports.build_weekly([card(purchase_price="5000")], today=TODAY)
     text = reports.render_text(r)
     for banned in ("Capital position", "allocation", "tranche", "cash available"):
         assert banned.lower() not in text.lower()
-    # ...and the constant is still available for the monthly report to use.
+    # ...and the monthly report can still use it.
     assert "capital_events" in reports.CAPITAL_UNAVAILABLE
 
 
@@ -219,7 +213,7 @@ def test_a_clean_week_has_no_gaps_block_at_all():
 
 
 def test_missing_purchase_date_is_surfaced_not_swallowed():
-    """A card with no purchase_date silently drops out of every aging bucket."""
+    """A card with no purchase_date doesn't show up in any of the aging numbers."""
     r = reports.build_weekly([card(id="x", purchase_date=None)], today=TODAY)
     assert r.source_counts["missing_purchase_date"] == 1
     assert any("purchase_date" in g for g in r.gaps)
@@ -233,7 +227,7 @@ def test_row_counts_travel_with_the_report():
 
 
 # --------------------------------------------------------------------------
-# Context numbers
+# Comparison numbers
 # --------------------------------------------------------------------------
 def test_best_and_worst_close_out():
     r = reports.build_weekly(
@@ -248,19 +242,19 @@ def test_best_and_worst_close_out():
 
 
 def test_trailing_average_uses_earlier_weeks_only():
-    """This week's sale must not leak into its own comparison baseline."""
+    """This week's sale shouldn't count in the average it gets compared to."""
     this_week = sold(id="now", sale_date="2026-09-25")
     last_week = sold(id="prior", sale_date="2026-09-18")
 
     r = reports.build_weekly([this_week, last_week], today=TODAY)
 
     assert len(r.sales) == 1
-    # one prior week had +62.00, three had nothing -> 62 / 4
+    # one week before had +62.00, three had nothing -> 62 / 4
     assert r.prior_4wk_average == Decimal("15.50")
 
 
 def test_label_uses_player_not_player_name():
-    """The column is `player`. `player_name` does not exist — a 9/17 trap."""
+    """The column is player. There's no player_name, that got me during the import."""
     line = reports.build_weekly(
         [card(player="Victor Wembanyama", purchase_date="2026-09-25")], today=TODAY
     ).purchases[0]

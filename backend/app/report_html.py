@@ -1,21 +1,21 @@
-"""report_html.py — the HTML rendering of a WeeklyReport.
+"""report_html.py
 
-Kept separate from `reports.py` on purpose: that module computes and must stay
-pure and easy to test; this one only presents. Neither knows how to send mail.
+Turns a WeeklyReport into the HTML email.
 
-EMAIL IS NOT THE WEB. The constraints that shaped every choice here:
-  * **Layout is tables.** Gmail, Outlook and Apple Mail disagree about flexbox
-    and grid. Tables have rendered the same everywhere for twenty years.
-  * **Styles are inline.** Gmail strips <style> blocks outright.
-  * **No charts, no SVG, no images.** Clients block remote images by default,
-    so an image-based chart is an empty box exactly when the report is being
-    skimmed on a phone. Per the form heuristic, the honest answer for four
-    headline numbers is a stat tile, not a chart.
-  * **600px**, the width every client shows without horizontal scroll.
+This is separate from reports.py on purpose. reports.py does the numbers, this
+just makes it look nice. Neither one sends the email.
 
-🔴 COLOUR NEVER CARRIES MEANING ALONE. Every coloured figure also has a sign
-(+/-) or a word beside it, so the report still reads correctly for a
-colourblind reader, in forced dark mode, and on a monochrome printout.
+Email HTML is a lot more limited than a web page, so:
+  * The layout uses tables. Gmail, Outlook and Apple Mail all handle flexbox
+    and grid differently, but tables look the same everywhere.
+  * Styles are inline because Gmail removes <style> blocks.
+  * No charts or images. Email apps block images by default, so a chart would
+    just be an empty box when I check it on my phone. Four big numbers work
+    better anyway.
+  * 600px wide so it fits without scrolling sideways.
+
+Color never means something on its own. Every colored number also has a +/- or
+a word next to it, so it still makes sense in dark mode or printed out.
 """
 
 from __future__ import annotations
@@ -26,18 +26,17 @@ from typing import Any, Optional
 
 from .reports import AGING_THRESHOLDS, CENTS, Line, WeeklyReport, _fmt
 
-# Status palette — reserved roles, never reused as decoration.
+# Status colors. Only used for these meanings, not for decoration.
 GOOD = "#0ca30c"
 WARNING = "#fab219"
 CRITICAL = "#d03b3b"
 
-#: Warning as BODY TEXT. `WARNING` is a mark/fill step — it measures 1.79:1 on
-#: the light surface, which is fine for a filled shape next to a label and
-#: unreadable as small text. This is the same hue darkened to clear 4.5:1.
-#: Never use `WARNING` itself for a run of text.
+# Warning color for text. The regular WARNING color is too light to read as
+# small text on a white background (fine for a filled box though), so this is
+# a darker version of it. Don't use WARNING for text.
 WARNING_INK = "#7a4f00"
 
-# Surfaces and ink.
+# Background and text colors.
 SURFACE = "#fcfcfb"
 PLANE = "#f9f9f7"
 INK = "#0b0b0b"
@@ -49,7 +48,7 @@ MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 
 
 def _h(text: Any) -> str:
-    """Escape. A set name containing '<' would otherwise eat the rest of the mail."""
+    """Escape the text. A set name with a '<' in it would break the rest of the email."""
     return (
         str(text)
         .replace("&", "&amp;")
@@ -59,7 +58,7 @@ def _h(text: Any) -> str:
 
 
 def signed(amount: Optional[Decimal]) -> tuple[str, str]:
-    """(text, colour). The sign lives in the TEXT so colour is never the only cue."""
+    """Returns (text, color). The +/- is in the text so it doesn't rely on color."""
     if amount is None:
         return ("n/a", INK_2)
     q = amount.quantize(CENTS)
@@ -130,7 +129,7 @@ def _period(report: WeeklyReport) -> str:
 
 
 def render_html(report: WeeklyReport) -> str:
-    """The full email document. `reports.render_text` is the plain alternative."""
+    """The full HTML email. reports.render_text is the plain text version."""
     net, net_color = signed(report.realized_profit)
     trailing = (
         f"4-wk avg {_fmt(report.prior_4wk_average)}"
@@ -170,7 +169,7 @@ def render_html(report: WeeklyReport) -> str:
 
     sections: list[str] = []
 
-    # The alert is first because it is the only part that asks for an action.
+    # The alert goes first since it's the only part that needs me to do something.
     if report.fee_gaps:
         sections.append(
             f'<tr><td style="padding:24px 0 0 0;">'
@@ -203,9 +202,8 @@ def render_html(report: WeeklyReport) -> str:
     counts = " &middot; ".join(
         f"{k.replace('_', ' ')}: {v}" for k, v in report.source_counts.items()
     )
-    # Only rendered when something is actually wrong. `build_weekly` no longer
-    # adds a standing disclaimer, so an empty `gaps` means a clean week and the
-    # block disappears entirely rather than printing an empty heading.
+    # Only shows up if something is actually missing. If gaps is empty it was
+    # a clean week and this section just doesn't show.
     gaps_block = ""
     if report.gaps:
         items = "".join(

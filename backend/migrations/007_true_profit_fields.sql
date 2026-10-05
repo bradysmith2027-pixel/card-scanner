@@ -1,69 +1,55 @@
 -- ============================================================
 -- 007_true_profit_fields.sql
--- Dreamboat Slabs — the columns honest profit is computed from, plus the
--- strategy dimensions the monthly review reports on.
+-- Adds the columns real profit needs, plus the fields my monthly review
+-- reports on.
 --
--- WHY THIS EXISTS (2026-09-13):
---   Profit was computed as `sale_price - purchase_price` in four independent
---   places (export.py:59, format.ts:27, viz.ts:68, and the grading cost was
---   never joined at all). No fees, no shipping, no grading, no tax. A
---   $100 -> $200 flip reported +$100 when the truth was ~$39.50 — roughly a
---   2.5x overstatement.
+-- Profit was being calculated as sale_price - purchase_price in a few
+-- different places, and grading cost wasn't included anywhere. No fees, no
+-- shipping, no grading, no tax. A $100 card I sold for $200 showed +$100 when
+-- I really made about $39.50.
 --
---   That was a bad habit at ~$10k of inventory. At $40-50k it is the thing
---   that decides which lanes get the next tranche, and since the capital is
---   entirely Brady's own there is NO outside investor reviewing the numbers.
---   The calculation is the only check that exists. Every buy decision has
---   been made against a number ~2.5x reality.
+-- That wasn't great at ~$10k of inventory. Now that I'm putting $40-50k in,
+-- these numbers decide where my money goes next, and it's all my own money so
+-- nobody else is checking them.
 --
---   The columns below are the inputs. Migration 007 does not change any
---   behaviour on its own — `app/profit.py` (the single profit definition)
---   is what consumes them, and nothing else is permitted to do the math.
+-- This migration only adds the columns. app/profit.py is what actually uses
+-- them, and it's the only place that does the math.
 --
--- ⚠️ THE CONVENTION CLASH — READ BEFORE ENTERING OR IMPORTING DATA
---   Brady's spreadsheet-era rule was: "Card Cost is price you paid after
---   shipping & taxes" — i.e. `purchase_price` was already ALL-IN.
+-- Heads up when entering or importing data:
+--   In my spreadsheet, "Card Cost" was the price after shipping and tax, so
+--   purchase_price was the all-in number.
 --
---   This migration splits that into purchase_price + shipping_in +
---   purchase_tax, because the split is what makes per-channel and
---   per-lane analysis possible.
+--   Now it's split into purchase_price + shipping_in + purchase_tax, so I can
+--   see costs by channel and by lane.
 --
---   The risk is silent and it runs one direction: entering an all-in number
---   into the price-only field DOUBLE-COUNTS shipping and tax, overstating
---   cost basis and understating ROI. Nothing errors. Nothing looks wrong.
+--   If I put an all-in number in the price field, shipping and tax get counted
+--   twice and my ROI looks worse. Nothing would error, it would just be wrong.
 --
---   Two consequences:
---     1. The manual-entry form must label `purchase_price` as CARD PRICE
---        ONLY, with shipping and tax as visibly separate fields.
---     2. The spreadsheet import (Phase 2) must map the sheet's all-in
---        "Card Cost" to purchase_price and leave shipping_in/purchase_tax
---        at 0 — NOT attempt to decompose it. Historical rows keep the old
---        convention honestly rather than being invented into the new one.
+--   So:
+--     1. The add card form has to label purchase_price as the card price only,
+--        with shipping and tax as their own fields.
+--     2. When I import the spreadsheet, Card Cost goes into purchase_price and
+--        shipping_in/purchase_tax stay 0. Don't try to split it up, I'd just be
+--        making up numbers.
 --
--- ⚠️ EXISTING ROWS
---   `position_type` is NOT NULL DEFAULT 'flip', so every card already in the
---   table backfills as a flip. Confirm that is actually true of the ~$10k
---   currently held and fix any exceptions IMMEDIATELY after applying this —
---   because of the immutability rule below, a mislabelled card cannot be
---   corrected through the API afterward.
+-- Cards already in the table:
+--   position_type defaults to 'flip', so every existing card becomes a flip.
+--   Check that's right for what I'm holding and fix anything wrong right after
+--   running this, because it can't be changed through the API later.
 --
--- ⚠️ LOWERCASE VALUES
---   Every value set here is lowercase, matching the rest of the schema. The
---   one exception in this database is grading_submissions.grading_company
---   (PSA/BGS/CGC/SGC), which is uppercase and has already caused one 23514
---   outage. Do not repeat that inconsistency.
+-- All the values here are lowercase like the rest of the database. The only
+-- uppercase ones are grading_company (PSA/BGS/CGC/SGC), which already caused
+-- an error once. Don't do that again.
 --
--- IDEMPOTENT
---   Uses ADD COLUMN IF NOT EXISTS throughout, so re-running is safe. The
---   CHECK constraints ride along with their columns for the same reason.
+-- Safe to run more than once (ADD COLUMN IF NOT EXISTS everywhere).
 -- ============================================================
 
 -- ------------------------------------------------------------
--- 1. Cost inputs — the buy side
+-- 1. Costs when buying
 --
---    Defaulting to 0 rather than NULL is deliberate: these feed a SUM, and
---    NULL would poison all_in_cost for every card that predates this
---    migration. 0 is the honest value for "no shipping was charged."
+--    These default to 0 instead of NULL on purpose. They get added together,
+--    and a NULL would make all_in_cost empty for every card added before this.
+--    0 just means no shipping was charged.
 -- ------------------------------------------------------------
 alter table cards add column if not exists shipping_in   numeric not null default 0
   check (shipping_in >= 0);
@@ -73,13 +59,12 @@ alter table cards add column if not exists other_costs   numeric not null defaul
   check (other_costs >= 0);
 
 -- ------------------------------------------------------------
--- 2. Cost + revenue inputs — the sell side
+-- 2. Costs and money in when selling
 --
---    shipping_collected is REVENUE, not a cost. It is the shipping fee the
---    customer pays on top of the card price (mostly eBay — the "green
---    shipping column" in Brady's sheet). Omitting it was the mirror image
---    of the gross-profit bug: it made every eBay sale look WORSE than it
---    actually was. It belongs in net_proceeds, added not subtracted.
+--    shipping_collected is money in, not a cost. It's the shipping the buyer
+--    pays on top of the card (mostly eBay, the green shipping column in my
+--    spreadsheet). Leaving it out made every eBay sale look worse than it was.
+--    It gets added in net_proceeds.
 -- ------------------------------------------------------------
 alter table cards add column if not exists shipping_out       numeric not null default 0
   check (shipping_out >= 0);
@@ -89,82 +74,74 @@ alter table cards add column if not exists shipping_collected numeric not null d
   check (shipping_collected >= 0);
 
 -- ------------------------------------------------------------
--- 3. position_type — flip vs hold
+-- 3. position_type: flip or hold
 --
---    🔒 THE RULE: a card enters the hold bucket AT PURCHASE and is never
---    reclassified. A flip that did not sell is a LOSS, not a collection
---    piece.
+--    The rule: a card is a flip or a hold from the day I buy it and never
+--    changes. If a flip doesn't sell, that's a loss, it doesn't get to become
+--    part of my collection.
 --
---    Why this is enforced in structure rather than trusted to discipline:
---    with no wall between the pools, "personal collection" is the perfect
---    hiding place for failed flips. Reclassify one and the position leaves
---    the performance report, ROI looks clean, and the monthly review shows
---    profit while capital sits frozen in cards nobody wanted. Nobody has to
---    act in bad faith for this to happen — which is exactly why it cannot
---    be left to good intentions.
+--    It's enforced in the code instead of just trusting myself. Flips and holds
+--    come out of the same money, so it would be way too easy to move bad flips
+--    into the collection. Then my ROI would look better than it really is while
+--    money sits in cards nobody wants.
 --
---    The database cannot express "immutable column" directly. Enforcement
---    lives in the API: `position_type` is OMITTED from the CardUpdate model,
---    the same treatment id / user_id / created_at / updated_at already get.
---    See app/routers/cards.py.
+--    The database can't make a column unchangeable, so the API does it.
+--    position_type is left out of CardUpdate, same as id, user_id, created_at
+--    and updated_at. See app/routers/cards.py.
 -- ------------------------------------------------------------
 alter table cards add column if not exists position_type text not null default 'flip'
   check (position_type in ('flip', 'hold'));
 
 -- ------------------------------------------------------------
--- 4. Reporting dimensions
+-- 4. Reporting fields
 --
---    `lane` drives §③ of the monthly review — the by-lane table is the
---    section that decides where the next tranche goes. Without this column
---    that section cannot be produced at all.
+--    lane is what the by-lane section of my monthly review uses, which is how
+--    I decide where the next chunk of money goes. Without it I can't make that
+--    section at all.
 --
---    Nullable on purpose: existing cards have no lane and guessing one
---    would fabricate the very data the report is supposed to reveal.
+--    It can be empty on purpose. Older cards don't have a lane, and guessing
+--    one would just make up the data the report is supposed to show me.
 -- ------------------------------------------------------------
 alter table cards add column if not exists lane text
   check (lane in ('graded_arb', 'raw_to_grade', 'sealed', 'optcg', 'other'));
 
---    Where a card actually SOLD. The app had acquisition_source (the buy
---    side) but nothing for the sell side. Brady sells across Discord (no
---    fees), Facebook, Instagram, eBay, and card shows — wildly different
---    fee structures. Without this, platform_fees is an unexplainable
---    number and "which channel nets most per hour?" is unanswerable.
+--    Where a card actually sold. I had acquisition_source for buying but
+--    nothing for selling. I sell on Discord (no fees), Facebook, Instagram,
+--    eBay and at card shows, and they all have different fees. Without this I
+--    can't explain platform_fees or figure out which channel makes me the most.
 alter table cards add column if not exists sale_channel text
   check (sale_channel in ('discord', 'facebook', 'instagram', 'ebay', 'show', 'other'));
 
 alter table cards add column if not exists buyer_name text;
 
 -- ------------------------------------------------------------
--- 5. Valuation + thesis
+-- 5. Value and reason for holding
 --
---    est_market_value is "what it's worth in hand" and powers the
---    "Inventory at est. market" line. Brady's convention: NULL it on sale,
---    because once a card is sold the actual price is the truth and a stale
---    estimate sitting beside it is just noise.
+--    est_market_value is what the card's worth right now, for the "Inventory at
+--    est. market" number. I clear it when a card sells, since then I have the
+--    real price.
 --
---    hold_thesis is the written reason a card entered the hold bucket.
---    Required in the UI when position_type = 'hold' (not enforced here —
---    a CHECK would fail every existing row). Its purpose is accountability:
---    an unwritten thesis is how "I'll keep this one" becomes strategy after
---    the fact.
+--    hold_thesis is why I'm keeping a card. The app requires it for holds (not
+--    in the database, a CHECK would fail on every existing card). If I don't
+--    write down why when I buy it, "I'll keep this one" turns into an excuse
+--    later.
 -- ------------------------------------------------------------
 alter table cards add column if not exists est_market_value numeric
   check (est_market_value is null or est_market_value >= 0);
 alter table cards add column if not exists hold_thesis text;
 
 -- ------------------------------------------------------------
--- 6. Indexes for the reporting queries this unlocks
+-- 6. Indexes for the report queries
 --
---    All three are filtered/grouped on by the monthly review. Partial index
---    on lane because it is nullable and NULL lanes are never grouped.
+--    The monthly review filters and groups by all three. The lane index skips
+--    empty lanes since those never get grouped.
 -- ------------------------------------------------------------
 create index if not exists cards_position_type_idx on cards (user_id, position_type);
 create index if not exists cards_lane_idx          on cards (user_id, lane) where lane is not null;
 create index if not exists cards_sale_channel_idx  on cards (user_id, sale_channel) where sale_channel is not null;
 
 -- ------------------------------------------------------------
--- 7. Column documentation — so the next person reading the schema in the
---    Supabase UI gets the conventions, not just the types.
+-- 7. Descriptions on the columns, so they show up in the Supabase dashboard.
 -- ------------------------------------------------------------
 comment on column cards.purchase_price is
   'CARD PRICE ONLY. Shipping and tax are separate (shipping_in, purchase_tax). Differs from the spreadsheet-era all-in convention — see migration 007.';
@@ -192,7 +169,7 @@ comment on column cards.hold_thesis is
   'Written reason this card entered the hold bucket. Required by the UI when position_type = hold.';
 
 -- ============================================================
--- VERIFY (run manually after applying)
+-- Check it worked (run after applying)
 --
 --   select column_name, data_type, is_nullable, column_default
 --     from information_schema.columns
@@ -203,10 +180,10 @@ comment on column cards.hold_thesis is
 --                          'est_market_value','hold_thesis')
 --    order by column_name;
 --
---   -- every existing card should now be 'flip' — confirm that is correct
+--   -- every existing card should be 'flip' now, make sure that's right
 --   select position_type, count(*) from cards group by position_type;
 --
---   -- constraints landed?
+--   -- did the constraints get added?
 --   select conname, pg_get_constraintdef(oid)
 --     from pg_constraint
 --    where conrelid = 'cards'::regclass and contype = 'c'

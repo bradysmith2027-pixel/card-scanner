@@ -1,46 +1,41 @@
 """
 [C] upload_to_roboflow.py
 
-Uploads a folder of card photos to your Roboflow project via their API,
-so you don't have to drag-and-drop 60+ files through the browser one at
-a time. Works for either dataset folder (Panini or One Piece) -- just
-point --images-dir at whichever one has new photos.
+Uploads a folder of card photos to my Roboflow project through their API, so
+I don't have to drag 60+ files into the browser. Works for any of the dataset
+folders, just point --images-dir at the one with new photos.
 
-This ONLY uploads the raw images. Annotating them (drawing the 5 boxes:
-year, set_name, set_logo, card_number, player_name) still happens in the
-Roboflow web UI -- but since you already have a trained model, turn on
-"Model-Assisted Labeling" there so it pre-labels the boxes for you and
-you just review/correct instead of drawing from scratch.
+This only uploads the photos. Labeling them (the 5 boxes: year, set_name,
+set_logo, card_number, player_name) still happens on the Roboflow website. Turn
+on "Model-Assisted Labeling" there so my trained model draws the boxes first
+and I just fix them.
 
-## One-time setup
+## Setup (only once)
 
-Install the roboflow package (not yet in requirements.txt, this is a new
-addition just for this script):
+Install the roboflow package (it's not in requirements.txt, only this script
+needs it):
 
     pip install roboflow
 
-Your ROBOFLOW_API_KEY env var (already set from Part 1 of the OCR
-pipeline) is reused here -- no new key needed.
+It uses the same ROBOFLOW_API_KEY env variable as everything else.
 
 ## Before running
 
-Open your Roboflow project in the browser and confirm the workspace and
-project IDs match the defaults below (Settings page shows both). The
-workspace ID is already confirmed from your model ID
-(bradys-workspace-wqkgm), but the project slug is a guess based on that
-same string -- verify it before your first real upload.
+Check that the workspace and project IDs below match what's on the Roboflow
+Settings page. The workspace (bradys-workspace-wqkgm) is right, but double
+check the project name before the first real upload.
 
 ## Running it
 
-Upload every image in the Panini folder that hasn't been uploaded yet:
+Upload every Panini photo that hasn't been uploaded yet:
 
     python "[C] upload_to_roboflow.py" --images-dir "../Panini"
 
-Upload One Piece photos once you've added more:
+Upload One Piece photos:
 
     python "[C] upload_to_roboflow.py" --images-dir "../One Piece"
 
-Dry run first (just lists what WOULD be uploaded, uploads nothing):
+Dry run (just lists what would get uploaded, doesn't upload anything):
 
     python "[C] upload_to_roboflow.py" --images-dir "../Panini" --dry-run
 """

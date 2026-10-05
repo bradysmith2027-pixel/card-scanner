@@ -1,55 +1,50 @@
 """
-transform_sales.py — CardSalesTrackerV3 "Sales" tab -> `cards` rows.
+transform_sales.py
 
-WHAT THIS DOES
-    Reads the Sep 11 2026 CSV export, maps it to the post-007/010 `cards`
-    schema, and writes two files:
+Turns the "Sales" tab from my old spreadsheet (CardSalesTrackerV3) into rows
+for the cards table.
 
-        import/dry-run-cards.json     the rows, ready to POST
-        import/reconciliation.md      sheet totals vs. recomputed totals
+It reads the CSV I exported, matches it to the cards table, and writes two
+files:
 
-    It does NOT touch the database. Per [C] Spreadsheet Import Plan.md step 4,
-    nothing gets promoted until the reconciliation ties out.
+    import/dry-run-cards.json     the rows, ready to send
+    import/reconciliation.md      the spreadsheet's totals vs what I calculate
 
-THE DECISIONS BAKED IN HERE (each one is a trap that was checked, not guessed)
+It doesn't touch the database. Nothing gets imported until the totals match.
 
-    1. "Card Cost" -> purchase_price, with shipping_in = purchase_tax = 0.
-       NOT decomposed. Migration 007's header says this explicitly: the sheet's
-       rule was "Card Cost is price you paid after shipping & taxes", so the
-       number is already all-in. Splitting it would mean inventing two values
-       that were never recorded. Historical rows keep the old convention
-       honestly rather than being fabricated into the new one.
+How it handles the spreadsheet:
 
-    2. Sold is detected by `Date Sold`, NEVER by the "Sold Yes or No" column.
-       That column reads 1 on 45 cards that have never sold — it is the sheet's
-       default, not an assertion. Trusting it would book 45 phantom sales.
+    1. "Card Cost" -> purchase_price, with shipping_in and purchase_tax = 0.
+       In my spreadsheet Card Cost was the price after shipping and tax, so
+       it's already the all-in number. I didn't split it up because I'd have to
+       make up the shipping and tax amounts.
 
-    3. Blank fees on a SOLD row are a REAL ZERO. (Corrected 2026-09-17.)
-       Brady records fees whenever they were charged, so a blank means none was.
-       Verified against the data before accepting it: 13 of 14 eBay sales carry a
-       fee, at 10.9-13.5% on large sales rising to 30-63% on sub-$5 cards — which
-       is what eBay's ~13% final-value fee plus a fixed per-order fee actually
-       does. Discord and cash sales mostly carry none, as expected.
+    2. A card counts as sold if it has a Date Sold, not from the "Sold Yes or
+       No" column. That column says 1 on 45 cards that never sold, it's just
+       the default. Using it would make 45 fake sales.
 
-       The rows are still listed below, but as a REVIEW list, not a correction
-       list. Exactly one is a true gap: row 72 (Booster Boxes, $341 on eBay) is
-       the only eBay sale with no fee recorded, and the fee there is worth $37-46,
-       enough to turn that flip from +$41 into a ~$5 LOSS.
+    3. A blank fee on a sold card means there was no fee. I always enter fees
+       when there is one. I checked the data to make sure: 13 of 14 eBay sales
+       have a fee, around 11-13% on bigger sales and higher on cheap cards,
+       which is how eBay's fees work. Discord and cash sales mostly don't have
+       one.
 
-    4. Inventory ("what it's worth in hand") -> est_market_value, and ONLY on
-       unsold cards. 33 sold cards still carry a stale Inventory number because
-       step 6 of the sheet's own instructions (delete it on sale) was skipped.
-       Copying those over would overstate holdings by $8,055.
+       The sales with no fee still get listed below, but just to look over.
+       Only one is actually missing a fee: row 72 (Booster Boxes, $341 on
+       eBay). The fee would be about $37-46, which turns it from +$41 into
+       about a $5 loss.
 
-    5. position_type = 'flip' for every row. It is IMMUTABLE in the API, so a
-       wrong guess here cannot be corrected later. Nothing in the sheet records
-       intent-to-keep, and the hold bucket is 0% for Tranche 1 by decision, so
-       'flip' is the only defensible value. Exceptions must be fixed in SQL
-       before the API ever sees them.
+    4. Inventory (what the card is worth) -> est_market_value, but only for
+       cards that haven't sold. 33 sold cards still have an old Inventory value
+       because I never cleared it when they sold. Copying those would make it
+       look like I'm holding $8,055 more than I am.
 
-    6. serial is parsed from the free-text "Card" column (/25, /499, ...) but
-       the original text is preserved verbatim in card_type. Parsing is
-       additive; nothing is thrown away on the strength of a regex.
+    5. position_type = 'flip' for every row. It can't be changed later in the
+       API, and nothing in the spreadsheet says which cards I meant to keep, so
+       flip is the only safe choice. Any exceptions have to be fixed in SQL.
+
+    6. The serial gets pulled out of the "Card" column (/25, /499, ...) but the
+       original text is kept in card_type, so nothing gets lost.
 """
 
 from __future__ import annotations
@@ -64,9 +59,9 @@ from pathlib import Path
 HERE = Path(__file__).parent
 SRC = HERE / "sales-export-2026-09-11.csv"
 
-# Column indices. The export has a TWO-ROW header (row 2 = labels, row 3 =
-# sub-labels) and row 2 ALSO holds the column totals, so "$ 14,942.10" is where
-# a naive reader finds the header for Card Cost. Indices are pinned on purpose.
+# Column numbers. The export has a two row header (row 2 = labels, row 3 =
+# sub-labels), and row 2 also has the column totals in it, so reading headers
+# normally would think "$ 14,942.10" is a header. That's why these are hardcoded.
 C_NUM, C_ACQ, C_YEAR, C_SET, C_PLAYER, C_CARD, C_SPORT = 1, 2, 3, 4, 5, 6, 7
 C_BUYCH, C_SELLER, C_COST, C_INV = 8, 9, 11, 12
 C_SOLD_DATE, C_BUYER, C_SALECH, C_SALE = 14, 16, 17, 18
@@ -89,9 +84,8 @@ SALE_CHANNEL = {
 def money(raw: str):
     """'$ 1,234.56' -> Decimal. Returns None for blank, '-' and #DIV/0!.
 
-    The sheet writes an empty cell as ' $ -   ' via its currency format, which
-    is a BLANK, not a zero. Treating it as 0 is how a missing fee becomes a
-    false claim that no fee was charged.
+    The spreadsheet shows an empty cell as ' $ -   ' because of the currency
+    format. That's blank, not 0.
     """
     s = raw.replace("$", "").replace(",", "").strip()
     if s in ("", "-", "#DIV/0!", "#REF!", "#VALUE!"):
@@ -115,47 +109,45 @@ def iso(raw: str):
 
 
 def parse_serial(card_text: str):
-    """Pull a print run out of free text: 'Auto /25' -> '/25'.
+    """Get the print run out of the text: 'Auto /25' -> '/25'.
 
-    Stored TEXT AS PRINTED per migration 010 — '/25', not two integers, because
-    '1/1', 'FOTL 12/99' and 'A/50' all fail an integer-pair shape. A card with
-    no /N is NOT numbered, which is a fact (NULL), not missing data.
+    Saved as text the way it's printed (migration 010), since serials like
+    '1/1', 'FOTL 12/99' and 'A/50' don't fit two numbers. No /N means the card
+    isn't numbered.
     """
     m = re.search(r"/\s*(\d+)", card_text or "")
     return f"/{m.group(1)}" if m else None
 
 
 # ---------------------------------------------------------------------------
-# BRADY'S DECISIONS, 2026-09-17. Recorded here because each one is a judgement
-# call that a future reader would otherwise have to re-derive from the data.
+# Calls I made on a few specific rows:
 #
-#   1. Row 64 ("All ebay sales", a batch line) IMPORTS AS-IS. It is real money
-#      and excluding it would break tie-out with the sheet. Its ROI is still
-#      nonsense; see ROI_EXCLUDE below.
-#   2. Missing sale_channel -> 'other'. Missing platform_fees still import as
-#      0 (the column is NOT NULL) and remain listed in the backfill table.
-#   3. Row 59 sold 2025-06-07 but was acquired 2025-08-01. Brady confirmed a
-#      typo. The correction is NOT a guess: rows 57 and 83 both sold
-#      2026-06-07, so row 59 was part of that day's batch and the wrong digit
-#      is the YEAR. Acquire date is left untouched.
+#   1. Row 64 ("All ebay sales", a bunch of sales on one line) gets imported
+#      as is. It's real money and leaving it out would make the totals not
+#      match. Its ROI doesn't mean anything though, see ROI_EXCLUDE below.
+#   2. No sale_channel -> 'other'. No platform_fees still imports as 0 (the
+#      column can't be empty) and stays on the list to check.
+#   3. Row 59 says it sold 2025-06-07 but I bought it 2025-08-01. That's a
+#      typo. Rows 57 and 83 both sold 2026-06-07, so row 59 was part of that
+#      same batch and the year is what's wrong. The buy date stays the same.
 # ---------------------------------------------------------------------------
 DATE_FIXES = {
-    # sheet row -> (field, corrected value, why)
+    # spreadsheet row -> (field, fixed value, why)
     "59": ("sale_date", "2026-06-07",
            "sheet read 2025-06-07, two months before acquisition; rows 57 and 83 "
            "sold 2026-06-07, so this was the same batch and the year was mistyped"),
 }
 
-# Rows that are real money but are NOT a single card, so their ROI is meaningless.
-# Reporting surfaces should exclude these from ROI averages and top-flip rankings.
+# Rows that are real money but aren't one card, so their ROI doesn't mean anything.
+# Reports should leave these out of ROI averages and top flips.
 ROI_EXCLUDE = {"64"}
 
 
 def main() -> None:
     rows = list(csv.reader(SRC.open(encoding="utf-8-sig")))
-    # Row 0-3 are spacer/header/sub-header/spacer. A real row has both a
-    # purchase date and a player name; everything else is the template's
-    # ~1,900 pre-numbered empty rows.
+    # Rows 0-3 are blank/header/sub-header/blank. A real row has a purchase
+    # date and a player. Everything else is the ~1,900 empty rows from the
+    # template.
     raw = [r for r in rows[4:] if len(r) > C_CARD and r[C_ACQ].strip() and r[C_PLAYER].strip()]
 
     cards, needs_fee_backfill, anomalies, batch_rows, corrections = [], [], [], [], []
@@ -163,7 +155,7 @@ def main() -> None:
     for r in raw:
         num = r[C_NUM].strip()
         sold_date = iso(r[C_SOLD_DATE])
-        is_sold = sold_date is not None          # decision 2
+        is_sold = sold_date is not None          # rule 2
         acq_date = iso(r[C_ACQ])
         cost = money(r[C_COST])
         card_text = r[C_CARD].strip()
@@ -173,19 +165,19 @@ def main() -> None:
             "player_name": r[C_PLAYER].strip(),
             "year": r[C_YEAR].strip() or None,
             "set_name": r[C_SET].strip() or None,
-            "card_type": card_text or None,       # verbatim; decision 6
+            "card_type": card_text or None,       # kept as is, rule 6
             "serial": parse_serial(card_text),
-            # category is NOT NULL (migration 003 made it required). A blank
-            # sport in the sheet becomes 'other' rather than failing the row.
+            # category is required (migration 003). A blank sport becomes
+            # 'other' so the row doesn't fail.
             "category": r[C_SPORT].strip().lower() or "other",
             "purchase_date": acq_date,
             "purchase_price": str(cost) if cost is not None else "0",
-            "shipping_in": "0",                   # decision 1 — NOT decomposed
+            "shipping_in": "0",                   # rule 1, not split up
             "purchase_tax": "0",
             "other_costs": "0",
             "acquisition_source": BUY_CHANNEL.get(r[C_BUYCH].strip().lower(), "other"),
             "seller_name": r[C_SELLER].strip() or None,
-            "position_type": "flip",              # decision 5 — immutable
+            "position_type": "flip",              # rule 5, can't change later
             "status": "sold" if is_sold else "in_hand",
         }
 
@@ -197,12 +189,12 @@ def main() -> None:
                 "shipping_collected": str(money(r[C_SHIP_COLL]) or 0),
                 "platform_fees": str(fees or 0),
                 "shipping_out": str(ship_out or 0),
-                # decision 2 — unknown channel is 'other', never blank
+                # no channel means 'other', never blank
                 "sale_channel": SALE_CHANNEL.get(r[C_SALECH].strip().lower(), "other"),
                 "buyer_name": r[C_BUYER].strip() or None,
             })
             if fees is None or not r[C_SALECH].strip():
-                needs_fee_backfill.append({          # decision 3
+                needs_fee_backfill.append({          # rule 3
                     "row": num, "player": card["player_name"], "sold": sold_date,
                     "sale_price": r[C_SALE].strip(),
                     "missing": [n for n, v in
@@ -221,18 +213,17 @@ def main() -> None:
             if acq_date and sold_date < acq_date:
                 anomalies.append(f"row {num} ({card['player_name']}): sold {sold_date} BEFORE acquired {acq_date}")
         else:
-            inv = money(r[C_INV])                  # decision 4 — unsold only
+            inv = money(r[C_INV])                  # rule 4, unsold only
             if inv is not None:
                 card["est_market_value"] = str(inv)
 
         if cost is None:
             anomalies.append(f"row {num} ({card['player_name']}): no Card Cost — ROI will be undefined (correct: no basis)")
 
-        # A BATCH row is not a card. The sheet has at least one line that lumps
-        # many sales together ("All" / "All ebay sales"). It is real money, so
-        # dropping it would break tie-out against the sheet's own total — but
-        # its ROI is nonsense (1900%) and would distort every average and land
-        # at the top of topFlips. Flagged for a human decision, not auto-dropped.
+        # A row with a bunch of sales lumped together isn't a card ("All" /
+        # "All ebay sales"). It's real money so dropping it would throw off the
+        # totals, but its ROI is crazy (1900%) and would mess up the averages
+        # and top flips. It gets flagged for me to decide, not dropped.
         if card["player_name"].strip().lower() in ("all", "total", "totals", "various", "misc"):
             batch_rows.append({
                 "row": num, "text": card["card_type"],
@@ -243,7 +234,7 @@ def main() -> None:
 
     (HERE / "dry-run-cards.json").write_text(json.dumps(cards, indent=2), encoding="utf-8")
 
-    # ---- reconciliation: our math vs. the sheet's own footer totals ----
+    # ---- check my math against the spreadsheet's totals ----
     def total(key, only_sold=False):
         return sum(Decimal(c.get(key) or 0) for c in cards
                    if not only_sold or c["status"] == "sold")

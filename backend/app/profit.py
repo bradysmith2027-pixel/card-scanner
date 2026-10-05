@@ -1,54 +1,37 @@
 """
-profit.py — THE profit definition. There is exactly one, and it lives here.
+profit.py
 
-WHY THIS MODULE EXISTS (2026-09-13)
-    Profit used to be computed in four independent places:
+All of the profit math lives here and nowhere else.
 
-        backend/app/routers/export.py:59    sale_price - purchase_price
-        dreamboat-frontend/src/lib/format.ts:27   profitOf(purchase, sale)
-        dreamboat-frontend/src/lib/viz.ts:68      revenue - cost
-        grading_submissions.cost                  never joined anywhere
+Profit used to get calculated in a few different places (the CSV export and a
+couple spots in the frontend) and none of them took out fees, shipping, or
+grading. So a $100 card I sold for $200 showed +$100 when I really made closer
+to $40. Now everything just uses what this file returns, and the frontend only
+displays it.
 
-    Four copies is how they all drifted into being wrong at the same time: no
-    fees, no shipping, no grading, no tax. A $100 -> $200 flip reported +$100
-    when the truth was ~$39.50 — a ~2.5x overstatement.
-
-    The fix is not "correct the four formulas." It is "have one formula."
-    Every surface consumes what this module returns. The frontend does NOT
-    recompute — format.ts and viz.ts render, they do not do arithmetic.
-
-    This matters more than normal because the capital is entirely Brady's own.
-    There is no outside investor reviewing the numbers, so this calculation is
-    the only thing standing between a losing lane and getting scaled.
-
-THE DEFINITION
+How the numbers work:
 
     all_in_cost  = purchase_price + shipping_in + purchase_tax + other_costs
-                 + grading cost (summed across submissions)
+                 + grading cost (all submissions added up)
 
     net_proceeds = sale_price + shipping_collected - platform_fees - shipping_out
 
     net_profit   = net_proceeds - all_in_cost
     roi          = net_profit / all_in_cost
 
-    shipping_collected is ADDED. It is the shipping fee the customer pays on
-    top of the card price — revenue, not cost. Leaving it out was the mirror
-    image of the gross-profit bug: it made eBay sales look worse than reality.
+shipping_collected gets added, not subtracted. It's what the buyer pays me for
+shipping, so it counts as money coming in.
 
-TWO RULES THAT ARE EASY TO GET WRONG
+Two rules:
 
-    1. An unsold card has net_profit = None, NEVER 0. Zero is a real value that
-       averages into ROI and drags it toward nothing; None is excluded. An
-       unsold card has not made or lost anything yet.
+    1. If a card isn't sold yet, net_profit is None, not 0. A 0 would get
+       averaged into ROI and drag it down even though nothing has happened yet.
 
-    2. ROI is None when all_in_cost is 0 — not 0, not infinity. A pulled card
-       has no basis, so "return on investment" is undefined rather than
-       infinite. Dividing here would raise, and defaulting to 0 would quietly
-       pollute every average.
+    2. If all_in_cost is 0 (like a card I pulled from a pack), roi is None.
+       Can't divide by 0, and putting 0 there would mess up the averages.
 
-PURE BY DESIGN
-    Nothing here touches the database. The caller fetches grading costs and
-    passes them in. That keeps the math unit-testable without a live Supabase.
+Nothing in here touches the database. The caller looks up the grading costs and
+passes them in, which makes this easy to test.
 """
 
 from __future__ import annotations
@@ -57,16 +40,16 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping, Optional
 
-# Money is rounded to cents on output; ROI keeps more precision because it is a
-# ratio that gets formatted as a percentage downstream.
+# Money gets rounded to cents. ROI keeps more decimals since it gets turned
+# into a percentage later.
 _CENTS = Decimal("0.01")
 _RATIO = Decimal("0.000001")
 
-# Fields summed into all_in_cost. Named here so a future cost column is added in
-# exactly one place and cannot be forgotten by one of the callers.
+# Everything that adds up to all_in_cost. If I add a new cost column, it only
+# has to go here.
 COST_FIELDS = ("purchase_price", "shipping_in", "purchase_tax", "other_costs")
 
-# Fields that make up net_proceeds. Sign matters: collected shipping is revenue.
+# What makes up net_proceeds. Shipping the buyer paid me counts as money in.
 PROCEEDS_ADD = ("sale_price", "shipping_collected")
 PROCEEDS_SUB = ("platform_fees", "shipping_out")
 
@@ -74,11 +57,11 @@ SOLD_STATUS = "sold"
 
 
 def _money(value: Any) -> Decimal:
-    """Coerce a DB/JSON value to Decimal, treating null and junk as 0.
+    """Turn a value from the database into a Decimal. Blank or bad values become 0.
 
-    Supabase returns numerics as strings or floats depending on the client and
-    column, so this normalises both. float is routed through str to avoid
-    binary-float artefacts like 0.1 + 0.2 showing up in a money total.
+    Supabase sometimes sends numbers back as strings and sometimes as floats,
+    so this handles both. Floats go through str() first so I don't get weird
+    float rounding showing up in money totals.
     """
     if value is None or value == "":
         return Decimal(0)
@@ -91,7 +74,7 @@ def _money(value: Any) -> Decimal:
 
 
 def _opt_money(value: Any) -> Optional[Decimal]:
-    """Like _money, but preserves the difference between 'absent' and 'zero'."""
+    """Same as _money, but keeps None as None instead of turning it into 0."""
     if value is None or value == "":
         return None
     if isinstance(value, Decimal):
@@ -103,7 +86,7 @@ def _opt_money(value: Any) -> Optional[Decimal]:
 
 
 def _as_date(value: Any) -> Optional[date]:
-    """Parse a date from the DB, which may hand back date, datetime, or str."""
+    """Get a date out of whatever the database sends (date, datetime, or a string)."""
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
@@ -111,29 +94,27 @@ def _as_date(value: Any) -> Optional[date]:
     if isinstance(value, date):
         return value
     try:
-        # Handles both "2026-09-13" and full ISO timestamps.
+        # Works for "2026-09-13" and full timestamps.
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
     except (ValueError, TypeError):
         return None
 
 
 def is_sold(card: Mapping[str, Any]) -> bool:
-    """A card counts as sold only on the explicit status.
+    """A card only counts as sold if its status says sold.
 
-    Deliberately NOT "has a sale_price". A card can carry a sale_price while
-    sitting in another status, and `traded_away` is a separate status precisely
-    because a trade is not a sale — it must never book revenue.
+    Having a sale_price isn't enough. Traded cards have their own status
+    (traded_away) because a trade isn't a sale and shouldn't count as revenue.
     """
     return (card.get("status") or "").lower() == SOLD_STATUS
 
 
 def grading_cost_for(submissions: Optional[Iterable[Mapping[str, Any]]]) -> Decimal:
-    """Sum the cost of a card's grading submissions.
+    """Add up what I paid to grade a card.
 
-    THIS IS THE JOIN EVERYONE FORGETS. `grading_submissions.cost` has existed
-    since the initial schema and was never once included in a profit number.
-    A card can have several submissions (resubmits, crossovers), so it sums
-    rather than taking one.
+    This cost was never included in profit before, which is part of why the old
+    numbers were too high. A card can be sent in more than once (resubmits,
+    crossovers), so it adds them all up.
     """
     if not submissions:
         return Decimal(0)
@@ -144,13 +125,13 @@ def all_in_cost(
     card: Mapping[str, Any],
     grading_cost: Decimal = Decimal(0),
 ) -> Decimal:
-    """Everything spent to get this card into hand and ready to sell."""
+    """Everything I spent to get the card in hand and ready to sell."""
     total = sum((_money(card.get(f)) for f in COST_FIELDS), Decimal(0))
     return (total + _money(grading_cost)).quantize(_CENTS)
 
 
 def net_proceeds(card: Mapping[str, Any]) -> Optional[Decimal]:
-    """What actually landed from the sale. None if the card is not sold."""
+    """What I actually took home from the sale. None if it isn't sold."""
     if not is_sold(card):
         return None
     total = sum((_money(card.get(f)) for f in PROCEEDS_ADD), Decimal(0))
@@ -162,7 +143,7 @@ def net_profit(
     card: Mapping[str, Any],
     grading_cost: Decimal = Decimal(0),
 ) -> Optional[Decimal]:
-    """Realized profit. None until sold — never 0. See module docstring."""
+    """Actual profit on the card. None until it sells, never 0."""
     proceeds = net_proceeds(card)
     if proceeds is None:
         return None
@@ -173,9 +154,9 @@ def roi(
     card: Mapping[str, Any],
     grading_cost: Decimal = Decimal(0),
 ) -> Optional[Decimal]:
-    """net_profit / all_in_cost, as a ratio (0.395 == +39.5%).
+    """net_profit / all_in_cost as a decimal (0.395 means +39.5%).
 
-    None when unsold, and None when all_in_cost is 0 (undefined, not infinite).
+    None if the card isn't sold or if it cost me nothing.
     """
     profit = net_profit(card, grading_cost)
     if profit is None:
@@ -190,14 +171,13 @@ def hold_days(
     card: Mapping[str, Any],
     today: Optional[date] = None,
 ) -> Optional[int]:
-    """Days the card has been (or was) held.
+    """How many days I've had the card (or had it before selling).
 
-    Sold   -> sale_date - purchase_date  (the clock stopped)
-    Unsold -> today - purchase_date      (the clock is running)
+    Sold   -> sale_date - purchase_date
+    Unsold -> today - purchase_date
 
-    None when purchase_date is missing. That is a real reporting hole, not a
-    cosmetic one: a card with no purchase_date has no age and drops out of
-    every aging bucket silently. Manual entry must require purchase_date.
+    None if there's no purchase_date. That card then won't show up in any of
+    the aging numbers, which is why the add card form makes the date required.
     """
     start = _as_date(card.get("purchase_date"))
     if start is None:
@@ -213,11 +193,11 @@ def enrich(
     submissions: Optional[Iterable[Mapping[str, Any]]] = None,
     today: Optional[date] = None,
 ) -> dict:
-    """Return the card dict plus the computed fields every surface reads.
+    """Return the card with all the calculated numbers added on.
 
-    Adds: all_in_cost, net_proceeds, net_profit, roi, hold_days, grading_cost.
-    The original keys are untouched, so this is safe to hand straight to the
-    response model.
+    Adds all_in_cost, net_proceeds, net_profit, roi, hold_days and
+    grading_cost. The original fields stay the same, so the result can go
+    straight into the response.
     """
     gcost = grading_cost_for(submissions)
     enriched = dict(card)
@@ -239,11 +219,11 @@ def enrich_many(
     submissions_by_card: Optional[Mapping[str, Iterable[Mapping[str, Any]]]] = None,
     today: Optional[date] = None,
 ) -> list[dict]:
-    """Batch form of `enrich`.
+    """Same as enrich, but for a list of cards.
 
-    `submissions_by_card` maps card_id -> that card's grading submissions, so
-    the caller can fetch them in ONE query instead of N. Pass None when grading
-    costs are not needed (they resolve to 0).
+    submissions_by_card maps each card id to its grading submissions, so the
+    caller can grab them all in one query instead of one per card. Pass None if
+    grading costs don't matter (they'll count as 0).
     """
     lookup = submissions_by_card or {}
     stamp = today or date.today()

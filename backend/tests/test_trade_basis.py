@@ -1,7 +1,7 @@
-"""Tests for trade carry-over basis.
+"""Tests for moving cost from traded cards to the cards I get back.
 
-The guard these tests exist to provide: a trade must never create or destroy
-basis. Whatever went out, plus cash, comes back in — to the penny.
+A trade should never create or lose cost. Whatever I gave up, plus any cash,
+ends up on the cards I got, to the cent.
 """
 
 from decimal import Decimal
@@ -25,10 +25,10 @@ def test_one_for_one_carries_basis_exactly():
 
 
 def test_trade_realizes_nothing_regardless_of_market_value():
-    """The received card is worth 4x the given card. Basis still carries.
+    """The card I got is worth 4x the one I gave. The cost still just moves over.
 
-    This is the whole point: a trade is not a windfall. If this ever starts
-    reporting a gain, the app is booking revenue on a trade again.
+    A trade isn't a profit. If this ever shows a gain, the app is counting a
+    trade as a sale again.
     """
     r = allocate_trade_basis(["50.00"], [ReceivedCard("Big", Decimal("200"))])
     assert r.total_basis == Decimal("50.00")
@@ -46,10 +46,10 @@ def test_cash_received_decreases_basis():
 
 
 def test_boot_exceeding_basis_floors_at_zero_and_reports_gain():
-    """Received $100 cash against a $30-basis card.
+    """Got $100 cash back for a card that cost me $30.
 
-    Basis cannot go negative. The $70 excess is real income and must be
-    surfaced, not silently clamped away.
+    Cost can't go below 0. The extra $70 is real profit, so it has to show up
+    instead of just disappearing.
     """
     r = allocate_trade_basis(["30.00"], [ReceivedCard("B", 1)], cash_boot="-100.00")
     assert r.total_basis == Decimal("0.00")
@@ -57,7 +57,7 @@ def test_boot_exceeding_basis_floors_at_zero_and_reports_gain():
 
 
 def test_multi_card_allocates_pro_rata_by_value():
-    """$300 basis across cards worth 300 / 100 -> 75% / 25%."""
+    """$300 of cost across cards worth 300 / 100 -> 75% / 25%."""
     r = allocate_trade_basis(
         ["300.00"],
         [ReceivedCard("X", Decimal("300")), ReceivedCard("Y", Decimal("100"))],
@@ -76,10 +76,10 @@ def test_many_to_many_sums_outgoing_basis():
 
 
 def test_pennies_reconcile_exactly_on_three_way_split():
-    """$100.00 three ways is the classic penny-leak case.
+    """$100.00 three ways is the classic lost penny case.
 
-    Naive rounding yields 33.33 x3 = 99.99 and one cent vanishes. Largest
-    remainder must give it back.
+    Normal rounding gives 33.33 x3 = 99.99 and a cent goes missing. This makes
+    sure it gets added back.
     """
     r = allocate_trade_basis(
         ["100.00"],
@@ -104,7 +104,7 @@ def test_allocation_always_sums_to_total_across_awkward_splits():
 
 
 def test_missing_values_fall_back_to_even_split_but_flag_it():
-    """An even split is allowed, never silent — the caller must be able to warn."""
+    """An even split is fine, but it has to be flagged so the app can warn me."""
     r = allocate_trade_basis(
         ["100.00"], [ReceivedCard("A"), ReceivedCard("B")]
     )
@@ -123,7 +123,7 @@ def test_no_cards_given_is_a_purchase_not_a_trade():
 
 
 def test_pulled_card_with_zero_basis_carries_zero():
-    """A pulled card has no basis. Trading it gives the received card none."""
+    """A card I pulled cost nothing, so trading it gives the new card no cost."""
     r = allocate_trade_basis(["0"], [ReceivedCard("B", Decimal("500"))])
     assert r.total_basis == Decimal("0.00")
     assert r.allocations["B"] == Decimal("0.00")

@@ -1,14 +1,14 @@
 -- ============================================================================
--- Dreamboat Slabs — Step 5 Backend: Initial Schema
+-- Dreamboat Slabs - first version of the database
 -- ============================================================================
--- Run this in the Supabase dashboard → SQL Editor.
--- Implements the design in "[C] Step 5 Backend Schema Design.md".
+-- Run this in Supabase -> SQL Editor.
+-- (Old version. I ended up building the tables in the dashboard instead.)
 --
--- Safe to run on a BLANK database. If tables already exist and you want a
--- clean slate, uncomment the DROP block below FIRST (destroys all data).
+-- Only run this on an empty database. If the tables already exist and you
+-- want to start over, uncomment the DROP block below first (deletes everything).
 -- ============================================================================
 
--- ---- Optional clean-slate reset (DESTRUCTIVE — uncomment only if intended) --
+-- ---- Start over (DELETES EVERYTHING, only uncomment if you mean it) -------
 -- drop table if exists public.status_history cascade;
 -- drop table if exists public.card_images cascade;
 -- drop table if exists public.cards cascade;
@@ -16,35 +16,35 @@
 -- ----------------------------------------------------------------------------
 
 -- ============================================================================
--- cards — the core inventory table
+-- cards: the main inventory table
 -- ============================================================================
 create table if not exists public.cards (
     id             uuid primary key default gen_random_uuid(),
     user_id        uuid not null references auth.users (id) on delete cascade,
 
-    -- Free text (NOT an enum) on purpose: a 3rd sports brand or TCG later
-    -- must not require a schema migration. Validated at the API layer.
+    -- Text instead of a set list on purpose, so adding another brand or TCG
+    -- later doesn't need a migration. The API checks it.
     card_type      text not null,
 
-    -- Text, not numeric: cards print ranges ("2024-25") and formats
-    -- ("44/99", "OP01-024", "RC-12") that aren't integers.
+    -- Text, not a number, because cards have things like "2024-25", "44/99",
+    -- "OP01-024" and "RC-12".
     year           text,
     set_name       text,
     card_number    text,
     player_name    text,
 
-    -- Manually picked from a catalog dropdown, never auto-classified.
+    -- Picked by hand from a dropdown, never guessed by the scanner.
     variation      text,
 
-    -- Field names OCR flagged as a front/back conflict, surfaced on the
-    -- confirmation screen. e.g. {'card_number'}.
+    -- Fields where the front and back didn't match, so they show up on the
+    -- confirm screen. Like {'card_number'}.
     needs_review   text[],
 
     purchase_price numeric(10,2) not null check (purchase_price >= 0),
     sale_price     numeric(10,2) check (sale_price is null or sale_price >= 0),
 
-    -- Current state. Full history lives in status_history (for hold-time
-    -- stats). Validated at the API layer against the allowed set:
+    -- Where the card is right now. The full history is in status_history (for
+    -- hold time). The API only allows:
     -- in_hand | in_transit | at_grading | traded_away | sold
     status         text not null default 'in_hand',
 
@@ -58,14 +58,14 @@ create index if not exists cards_user_id_idx on public.cards (user_id);
 create index if not exists cards_status_idx  on public.cards (user_id, status);
 
 -- ============================================================================
--- card_images — 1..n images per card (Sports = front+back, One Piece = front)
+-- card_images: 1 or more photos per card (sports = front+back, One Piece = front)
 -- ============================================================================
 create table if not exists public.card_images (
     id           uuid primary key default gen_random_uuid(),
     card_id      uuid not null references public.cards (id) on delete cascade,
     side         text not null check (side in ('front', 'back')),
-    -- Path in the PRIVATE Supabase Storage bucket: {user_id}/{card_id}/{side}.jpg
-    -- (never the raw image bytes).
+    -- Path in the private storage bucket: {user_id}/{card_id}/{side}.jpg
+    -- (not the actual image).
     storage_path text not null,
     created_at   timestamptz not null default now()
 );
@@ -73,7 +73,7 @@ create table if not exists public.card_images (
 create index if not exists card_images_card_id_idx on public.card_images (card_id);
 
 -- ============================================================================
--- status_history — append-only audit trail (drives "avg hold time" in P&L)
+-- status_history: log of every status change (for average hold time on P&L)
 -- ============================================================================
 create table if not exists public.status_history (
     id         uuid primary key default gen_random_uuid(),
@@ -85,7 +85,7 @@ create table if not exists public.status_history (
 create index if not exists status_history_card_id_idx on public.status_history (card_id);
 
 -- ============================================================================
--- updated_at trigger — Postgres does NOT bump this automatically
+-- updated_at trigger, since Postgres doesn't update it on its own
 -- ============================================================================
 create or replace function public.set_updated_at()
 returns trigger
@@ -104,23 +104,23 @@ create trigger cards_set_updated_at
     execute function public.set_updated_at();
 
 -- ============================================================================
--- Row-Level Security — the real enforcement wall
+-- Row Level Security, this is what actually keeps users apart
 -- ============================================================================
--- Backend forwards each user's JWT, so auth.uid() = the logged-in user.
--- The service_role key bypasses all of this (used ONLY for ops like pg_dump).
+-- The backend sends each user's token, so auth.uid() = whoever is logged in.
+-- The service_role key skips all of this (only for admin stuff like backups).
 
 alter table public.cards          enable row level security;
 alter table public.card_images    enable row level security;
 alter table public.status_history enable row level security;
 
--- cards: a user sees and touches only their own rows.
+-- cards: you only see and change your own cards.
 drop policy if exists cards_owner_all on public.cards;
 create policy cards_owner_all on public.cards
     for all
     using (user_id = auth.uid())
     with check (user_id = auth.uid());
 
--- card_images: ownership is inherited via the parent card.
+-- card_images: goes by who owns the card.
 drop policy if exists card_images_owner_all on public.card_images;
 create policy card_images_owner_all on public.card_images
     for all
@@ -137,7 +137,7 @@ create policy card_images_owner_all on public.card_images
         )
     );
 
--- status_history: same inherited ownership.
+-- status_history: same, goes by who owns the card.
 drop policy if exists status_history_owner_all on public.status_history;
 create policy status_history_owner_all on public.status_history
     for all
@@ -155,15 +155,15 @@ create policy status_history_owner_all on public.status_history
     );
 
 -- ============================================================================
--- Storage bucket — create separately in the dashboard, NOT here
+-- Storage bucket: make this in the dashboard, not here
 -- ============================================================================
--- In Supabase dashboard → Storage:
---   1. Create a bucket named "card-images"
---   2. Leave "Public bucket" OFF (private) — a public bucket lets anyone
---      enumerate other users' card photos.
---   3. Add a Storage RLS policy so users only read/write their own folder:
+-- In Supabase -> Storage:
+--   1. Make a bucket called "card-images"
+--   2. Leave "Public bucket" off. A public bucket would let anyone see other
+--      people's card photos.
+--   3. Add a storage policy so people only get their own folder:
 --        bucket_id = 'card-images'
 --        AND (storage.foldername(name))[1] = auth.uid()::text
---      (This matches the {user_id}/{card_id}/{side}.jpg path convention.)
---   4. Serve images to the frontend via short-lived SIGNED URLs.
+--      (Matches the {user_id}/{card_id}/{side}.jpg paths.)
+--   4. Show images in the frontend with temporary signed links.
 -- ============================================================================

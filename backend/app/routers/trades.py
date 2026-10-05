@@ -1,33 +1,31 @@
 """
-trades.py — record a trade as a carry-over-basis event.
+trades.py
 
-WHY THIS EXISTS (2026-09-14)
-    The `trades` and `trade_items` tables shipped with the original schema and
-    NO code has ever touched them. Trades were recorded in the old spreadsheet
-    as break-even SALES, which corrupts ROI, sell-through, hold time, and — the
-    expensive one — cost basis. A received card with $0 basis reports its whole
-    eventual sale price as profit.
+Saves a trade and moves the cost from the cards I gave up onto the cards I got.
 
-    This endpoint makes a trade what it actually is: basis moving, nothing
-    realized. `app.trade_basis` owns the math the same way `app.profit` owns
-    profit. Neither the router nor the frontend does arithmetic.
+The trades and trade_items tables were in my schema from the start but nothing
+used them. In my spreadsheet I logged trades as sales that broke even, which
+messed up my ROI, sell-through, hold time, and worst of all the cost of the
+card I got back. A card with a $0 cost shows its whole sale price as profit.
 
-⚠️ TRANSACTIONALITY — READ THIS BEFORE TRUSTING IT WITH A BIG TRADE
-    PostgREST gives us no cross-table transaction, so this endpoint performs
-    several writes in sequence. Ordering is chosen so the least-destructive
-    thing happens on a partial failure:
+Now a trade just moves the cost over and nothing counts as profit. The math is
+in app.trade_basis. This file and the frontend don't do any math.
 
-        1. READ + VALIDATE + COMPUTE   (cannot corrupt anything)
-        2. INSERT trades               (orphan trade = harmless, no card moved)
-        3. INSERT received cards       (new rows, nothing overwritten)
-        4. INSERT trade_items          (lineage)
-        5. UPDATE given -> traded_away (LAST — the only destructive step)
+Supabase's API can't do one transaction across tables, so this saves things
+one step at a time, in an order where a failure partway through does the least
+damage:
 
-    So a mid-flight failure leaves extra rows, never lost inventory. Every
-    failure logs the trade id so the partial state is findable.
+    1. Read, check and do the math   (can't break anything)
+    2. Save the trade                 (if it stops here, no cards moved)
+    3. Save the cards I got           (new rows, nothing overwritten)
+    4. Save trade_items               (links everything together)
+    5. Mark my cards as traded_away   (last, since it's the only step that changes existing cards)
 
-    The correct long-term fix is a Postgres function called via RPC so the
-    whole thing is one transaction. Logged in the tech-debt backlog.
+So if something fails I might end up with extra rows, but I never lose cards.
+Every failure logs the trade id so I can find it.
+
+The real fix would be a Postgres function that does it all in one transaction.
+It's on my to do list.
 """
 
 import logging
@@ -48,21 +46,21 @@ router = APIRouter(prefix="/trades", tags=["trades"])
 log = logging.getLogger(__name__)
 
 Money = Annotated[Decimal, Field(ge=0, le=10_000_000)]
-# Boot is the one signed money field in the app: negative means Brady received
-# cash. Bounded both ways rather than ge=0.
+# Cash boot is the only money field that can be negative. Negative means I got
+# cash back. So it has a limit both ways instead of just >= 0.
 SignedMoney = Annotated[Decimal, Field(ge=-10_000_000, le=10_000_000)]
 
 TRADED_AWAY = "traded_away"
 
 
 class ReceivedCardIn(CardCreate):
-    """A card coming IN on a trade.
+    """A card I'm getting in the trade.
 
-    Inherits every field of CardCreate so a traded-in card is a first-class
-    card — same validation, same required fields, same `position_type` rule.
+    It uses all of CardCreate, so it's a normal card with the same checks and
+    the same position_type rule.
 
-    `est_value` is an ALLOCATION WEIGHT, not a price. It decides how much of
-    the carried basis this card absorbs and is never used as a valuation.
+    est_value isn't a price. It just decides how much of the cost this card
+    takes.
     """
 
     est_value: Optional[Money] = None
@@ -93,18 +91,18 @@ def create_trade(
     payload: TradeCreate,
     user: AuthedUser = Depends(current_user),
 ) -> TradeResult:
-    """Record a trade: carry basis from the cards given onto the cards received."""
+    """Save a trade and move the cost from the cards I gave onto the cards I got."""
     client = user_client(user.token)
 
-    # --- 1. READ + VALIDATE + COMPUTE (no writes yet) ----------------------
+    # --- 1. Read, check and do the math (nothing saved yet) ----------------
     given_rows = _fetch_given_cards(client, payload.given_card_ids)
 
     already_gone = [
         r["id"] for r in given_rows if (r.get("status") or "").lower() == TRADED_AWAY
     ]
     if already_gone:
-        # Trading the same card twice would carry its basis into two different
-        # cards — basis created from nothing. Refuse rather than double-count.
+        # If the same card is in the trade twice, its cost would get counted
+        # twice. Don't allow it.
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Already traded away: {', '.join(already_gone)}",
@@ -144,7 +142,7 @@ def create_trade(
             "gain on the trade."
         )
 
-    # --- 2. INSERT the trade ----------------------------------------------
+    # --- 2. Save the trade ------------------------------------------------
     trade_row = {
         "user_id": user.id,
         "trade_date": payload.trade_date.isoformat(),
@@ -156,14 +154,13 @@ def create_trade(
     }
     trade_id = _insert_one(client, "trades", trade_row, "Failed to record trade.")["id"]
 
-    # --- 3. INSERT the received cards -------------------------------------
+    # --- 3. Save the cards I got -------------------------------------------
     received_cards: list[dict] = []
     for i, incoming in enumerate(payload.received):
         row = incoming.model_dump(mode="json", exclude={"est_value"})
         row["user_id"] = user.id
-        # The allocated basis IS the card's purchase price. Writing it here
-        # means every existing profit surface works on a traded-in card with
-        # no changes to app.profit.
+        # The card's share of the cost becomes its purchase price, so the
+        # profit stuff works on traded cards without changing app.profit.
         row["purchase_price"] = str(result.allocations[str(i)])
         row["purchase_date"] = payload.trade_date.isoformat()
         row["acquisition_source"] = "trade"
@@ -171,7 +168,7 @@ def create_trade(
             _insert_one(client, "cards", row, "Failed to create a traded-in card.")
         )
 
-    # --- 4. INSERT lineage -------------------------------------------------
+    # --- 4. Save trade_items ----------------------------------------------
     for row in given_rows:
         _insert_one(
             client,
@@ -193,7 +190,7 @@ def create_trade(
             "Failed to record a traded-in line item.",
         )
 
-    # --- 5. UPDATE given cards LAST (the only destructive step) ------------
+    # --- 5. Mark the cards I gave as traded_away (last on purpose) --------
     for row in given_rows:
         try:
             client.table("cards").update({"status": TRADED_AWAY}).eq(
@@ -228,11 +225,10 @@ def create_trade(
 
 
 def _fetch_given_cards(client, card_ids: list[str]) -> list[dict]:
-    """Load the outgoing cards, RLS-scoped. Any id we can't see is a 404.
+    """Load the cards I'm giving up. Any id I can't see is a 404.
 
-    Deliberately does NOT distinguish "no such card" from "someone else's
-    card" — same reasoning as the cards router, where confirming another
-    user's row exists is itself a leak.
+    Doesn't say whether the card doesn't exist or belongs to someone else,
+    same as in the cards router.
     """
     rows: list[dict] = []
     for cid in card_ids:

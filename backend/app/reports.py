@@ -1,20 +1,20 @@
-"""Weekly Ops report — computed from the database, never hand-assembled.
+"""Weekly Ops report, built straight from the database.
 
-`04 Dreamboat Slabs/[C] Reporting Procedure.md` states the rule this module
-enforces: *"every report is generated from the database, never hand-assembled.
-A report typed by hand is a report that quietly flatters itself."*
+My rule for reports is that they always come from the database and never get
+put together by hand. A report I type up myself is going to end up making
+things look better than they are.
 
-Design rules, all of them load-bearing:
+How this file works:
 
-1. **This module never does profit math.** Every money figure comes from
-   `profit.enrich_many`. Six drifting copies of the profit formula is the
-   mistake this codebase already made once (found 2026-09-11, fixed 09-13).
-2. **Pure functions.** No database, no network, no email. Rows in, report
-   object out — so the whole thing is testable without a live Supabase.
-3. **A gap is reported as a gap, never omitted and never faked.** Anything
-   that cannot be computed says so in the output.
-4. **Row counts travel with the report**, so a truncated query is visible
-   instead of silently producing a rosy week.
+1. No profit math in here. Every money number comes from profit.enrich_many.
+   I already had profit calculated in six different places once and they all
+   ended up wrong.
+2. No database, network or email in here either. Cards go in, a report comes
+   out, so it's easy to test.
+3. If something can't be calculated, the report says so. It doesn't skip it
+   or make up a number.
+4. The report includes how many rows it used, so if a query got cut off I can
+   tell instead of getting a week that looks too good.
 """
 
 from __future__ import annotations
@@ -31,39 +31,34 @@ ZERO = Decimal("0")
 
 IN_TRANSIT_STATUS = "in_transit"
 
-#: Aging thresholds, in days held. A card is reported when it CROSSES one of
-#: these inside the reporting window, not every week thereafter — a report that
-#: repeats the same twelve cards every Sunday stops being read by week three.
+# Aging cutoffs in days. A card shows up the week it crosses one of these, not
+# every week after. If the same twelve cards showed up every Sunday I'd stop
+# reading it.
 AGING_THRESHOLDS = (90, 180)
 
-#: Channels that always deduct a fee at sale.
-#:
-#: 🔴 This is deliberately a small allowlist rather than "flag every zero."
-#: `platform_fees` is `NOT NULL DEFAULT 0`, so a zero is not a null and does
-#: not by itself mean data is missing. The 2026-09-17 import audit settled
-#: this: Brady's position was *"I would include fees if they had them,"* and
-#: the data agreed — 13 of 14 eBay sales carried a fee at credible rates,
-#: while cash and in-person sales legitimately carry none. Flagging every
-#: zero would have produced 23 false alarms and one real one, which is how a
-#: report trains you to ignore it.
-#:
-#: Exactly one genuine gap existed (row 72, Booster Boxes, $341 on eBay —
-#: whose missing fee flips it from +$41 to about -$5). This rule finds that
-#: row and leaves the other 22 alone.
+# Places that always take a fee when something sells.
+#
+# I only flag a $0 fee on these, not every $0 fee. platform_fees defaults to 0,
+# and a 0 usually just means there wasn't a fee (cash, in person, Discord). I
+# always enter fees when there are some. When I imported my spreadsheet, 13 of
+# 14 eBay sales had a fee, and flagging every 0 would have been 23 false alarms
+# for 1 real one.
+#
+# The one real one was a $341 eBay sale of booster boxes with no fee entered,
+# which takes it from about +$41 to about -$5. This catches that one and
+# leaves the rest alone.
 FEE_CHARGING_CHANNELS = frozenset({"ebay"})
 
-#: 🔴 THE MONTHLY REPORT MUST PRINT THIS. The monthly review has a capital
-#: section (cash available, allocation vs 70/15/15, tranche status) and none of
-#: it is computable until the `capital_events` ledger exists. It has to say so
-#: rather than substituting cost-of-inventory, which differs from capital
-#: deployed by whatever cash is on hand — a plausible wrong number in a
-#: self-reviewed report is the exact failure this reporting system exists to
-#: prevent, and there is no outside investor to catch it.
-#:
-#: It is deliberately NOT on the WEEKLY report (removed 2026-09-30, Brady's
-#: call). The weekly has no capital section for it to qualify, so it was
-#: unchanging boilerplate on every send — and a notice that never changes is
-#: one readers learn to skip, which would blunt the gaps that DO vary.
+# The monthly report needs to show this. It has a capital section (cash on
+# hand, the 70/15/15 split, tranche status) and none of that can be calculated
+# until I build the capital_events table. Until then it should say that instead
+# of using inventory cost, which isn't the same thing as how much money I've
+# put in. Nobody else is checking these numbers, so a wrong number that looks
+# right is the worst thing it could show.
+#
+# I took it off the weekly report. The weekly doesn't have a capital section,
+# so it was just the same note every week, and I'd start skipping that part
+# and miss the notes that actually change.
 CAPITAL_UNAVAILABLE = (
     "Capital position (cash available, allocation vs 70/15/15, tranche status): "
     "NOT AVAILABLE — requires the capital_events ledger (Phase 2)."
@@ -71,7 +66,7 @@ CAPITAL_UNAVAILABLE = (
 
 
 def _money(value: Any) -> Decimal:
-    """Coerce to Decimal. None and unparseable values become 0."""
+    """Turn a value into a Decimal. Blank or bad values become 0."""
     if value is None:
         return ZERO
     if isinstance(value, Decimal):
@@ -94,10 +89,10 @@ def _as_date(value: Any) -> Optional[date]:
 
 
 def _label(card: Mapping[str, Any]) -> str:
-    """Human-readable card name for a report line.
+    """The card's name for a line in the report.
 
-    ⚠️ The column is `player`, NOT `player_name` — a trap the migrations never
-    described and the 9/17 import hit head-on.
+    The column is player, not player_name. That tripped me up during the
+    spreadsheet import.
     """
     bits = [
         str(card.get("year") or "").strip(),
@@ -112,18 +107,16 @@ def _label(card: Mapping[str, Any]) -> str:
 
 
 def week_bounds(report_date: date, days: int = 7) -> tuple[date, date]:
-    """The window a report covers: [start, end), `days` long, ending today.
+    """The dates a report covers: from start up to (not including) end.
 
-    Half-open on purpose, and the boundaries are worth stating exactly because
-    off-by-one here either double-counts a sale or loses one:
+    Getting this off by one day would count a sale twice or miss it, so:
 
-        a sale dated `start`  -> IN this report   (start is inclusive)
-        a sale dated `end`    -> NEXT report      (end is exclusive)
+        a sale on start  -> in this report
+        a sale on end    -> in next week's report
 
-    `end` is today, so a sale closed later today lands in next week's report.
-    That is the right behaviour for a Sunday-morning report on the week that
-    just finished, and it guarantees consecutive windows tile perfectly: no
-    sale is ever counted twice or dropped between them.
+    end is today, so anything I sell later today shows up next week. That
+    works for a Sunday morning report on the week before, and it means no
+    sale ever gets counted twice or skipped between weeks.
     """
     return (report_date - timedelta(days=days), report_date)
 
@@ -134,7 +127,7 @@ def _in_window(when: Optional[date], start: date, end: date) -> bool:
 
 @dataclass
 class Line:
-    """One named card on a report, with the single number that earned it a line."""
+    """One card on the report, with the number that got it there."""
 
     card_id: str
     label: str
@@ -163,14 +156,14 @@ class WeeklyReport:
     in_transit_count: int = 0
     in_transit_dollars: Decimal = ZERO
 
-    #: Row counts the report was built from, so truncation is visible.
+    # How many rows the report used, so I can tell if something got cut off.
     source_counts: dict[str, int] = field(default_factory=dict)
-    #: Things that could not be computed, stated rather than hidden.
+    # Anything that couldn't be calculated, so it shows up instead of being hidden.
     gaps: list[str] = field(default_factory=list)
 
     @property
     def quiet(self) -> bool:
-        """True when nothing at all happened. Still gets sent."""
+        """True if nothing happened this week. It still gets sent."""
         return not self.purchases and not self.sales
 
 
@@ -193,8 +186,8 @@ def build_weekly(
 ) -> WeeklyReport:
     """Build the Weekly Ops report.
 
-    `cards` is every card row for the user — not a pre-filtered set. Filtering
-    happens here so the row counts in the output mean something.
+    cards is every card for the user, not a filtered list. The filtering
+    happens in here so the row counts actually mean something.
     """
     report_date = today or date.today()
     start, end = week_bounds(report_date, window_days)
@@ -215,13 +208,13 @@ def build_weekly(
         if bought is None:
             no_purchase_date += 1
 
-        # --- purchases logged this week ---
+        # --- cards bought this week ---
         if _in_window(bought, start, end):
             cost = _money(card.get("all_in_cost"))
             report.purchases.append(Line(cid, _label(card), cost))
             report.purchase_cost += cost
 
-        # --- sales closed this week ---
+        # --- cards sold this week ---
         if sold:
             sold_total += 1
             sale_day = _as_date(card.get("sale_date"))
@@ -236,7 +229,7 @@ def build_weekly(
                 report.sales.append(line)
                 report.realized_profit += net
 
-                # fee gap — only where the channel always charges one
+                # missing fee, only for places that always charge one
                 channel = (card.get("sale_channel") or "").lower()
                 if channel in FEE_CHARGING_CHANNELS and _money(
                     card.get("platform_fees")
@@ -250,7 +243,7 @@ def build_weekly(
                         )
                     )
 
-        # --- aging: crossed a threshold inside this window ---
+        # --- aging: cards that crossed a cutoff this week ---
         if not sold and bought is not None:
             held = card.get("hold_days")
             if isinstance(held, int):
@@ -265,7 +258,7 @@ def build_weekly(
                             )
                         )
 
-        # --- capital in flight ---
+        # --- money tied up in cards in transit or at grading ---
         if status == IN_TRANSIT_STATUS:
             report.in_transit_count += 1
             report.in_transit_dollars += _money(card.get("all_in_cost"))
@@ -274,7 +267,7 @@ def build_weekly(
         report.best_sale = max(report.sales, key=lambda l: l.amount or ZERO)
         report.worst_sale = min(report.sales, key=lambda l: l.amount or ZERO)
 
-    # --- trailing average, for context on this week's number ---
+    # --- average over the last few weeks, to compare this week to ---
     prior: list[Decimal] = []
     for i in range(1, trailing_weeks + 1):
         w_end = start - timedelta(days=window_days * (i - 1))
@@ -296,7 +289,7 @@ def build_weekly(
             "and are invisible to the aging section."
         )
 
-    # 🔴 The capital disclaimer is NOT added here — see CAPITAL_UNAVAILABLE.
+    # The capital note doesn't go here on purpose, see CAPITAL_UNAVAILABLE.
     return report
 
 
@@ -309,7 +302,7 @@ def _fmt(amount: Optional[Decimal]) -> str:
 
 
 def render_text(report: WeeklyReport) -> str:
-    """Plain-text rendering. The HTML mail body is built from the same data."""
+    """Plain text version. The HTML email uses the same data."""
     out: list[str] = []
     add = out.append
 

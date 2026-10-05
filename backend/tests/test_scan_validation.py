@@ -1,9 +1,11 @@
 """
-test_scan_validation.py — mocked unit tests for POST /scan input validation.
+test_scan_validation.py
 
-run_scan (YOLO + GPT-4o) is mocked, so these run with NO model load and NO
-OpenAI spend. They prove the endpoint rejects bad input BEFORE any paid work,
-and maps pipeline errors to the right status codes:
+Tests for the input checks on POST /scan.
+
+run_scan is faked, so no model gets loaded and nothing gets spent on OpenAI.
+These check that bad uploads get rejected before anything that costs money
+runs, and that errors turn into the right status codes:
   - capture_mode must be sports|tcg           -> 400
   - front must be an image                     -> 415
   - empty file                                 -> 400
@@ -23,7 +25,7 @@ pytestmark = pytest.mark.unit
 
 client = TestClient(app)
 
-# Minimal fake JPEG bytes — content isn't decoded here (run_scan is mocked).
+# Fake JPEG bytes. They don't get opened since run_scan is faked.
 _IMG = ("front.jpg", b"\xff\xd8\xff\xe0fake-jpeg-bytes", "image/jpeg")
 
 
@@ -61,7 +63,7 @@ def test_empty_file_rejected_400(auth):
 
 
 def test_oversize_file_rejected_413(auth, monkeypatch):
-    monkeypatch.setattr("app.routers.scan.MAX_UPLOAD_BYTES", 10)  # shrink cap for a light test
+    monkeypatch.setattr("app.routers.scan.MAX_UPLOAD_BYTES", 10)  # lower the limit so the test file can be small
     with patch("app.routers.scan.run_scan", return_value={}):
         resp = client.post(
             "/scan",

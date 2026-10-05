@@ -1,21 +1,20 @@
 """
-test_export_logic.py — mocked unit tests for GET /export/csv.
+test_export_logic.py
 
-No DB: the cards list is faked. These pin down the CSV contract and the money
-logic that replaces the old Excel formula.
+Tests for GET /export/csv with fake cards. They check the CSV columns and the
+money math that replaced my old Excel formula.
 
-UPDATED 2026-09-13. The export no longer computes profit itself — it consumes
-`app.profit`, the single definition. Two of these tests previously asserted the
-OLD gross behaviour:
+The export doesn't calculate profit itself anymore, it uses app.profit. Two of
+these tests used to check the old way:
 
-  - the 11-column header (now 28 columns, with the cost breakdown beside the
-    result so a number is never unexplained)
-  - `profit = sale_price - purchase_price`
+  - the 11 column header (now 28 columns, with the cost breakdown next to the
+    profit so you can see where the number came from)
+  - profit = sale_price - purchase_price
 
-Note the old profit test would still have passed on its arithmetic, because
-with no fee data net and gross are identical. That is precisely why the bug
-survived so long: every test fixture omitted fees, so the gross formula looked
-correct. The fee test below is the guard that was missing.
+The old profit test would actually still pass, because with no fees in the
+test data, the right answer and the wrong answer are the same. That's why the
+bug lasted so long. None of the tests had fees in them. The fee test below is
+the one that was missing.
 """
 
 import pytest
@@ -28,9 +27,8 @@ pytestmark = pytest.mark.unit
 client = TestClient(app)
 
 _HEADER = [
-    # `serial` added by migration 010 (2026-09-16), sitting next to card_number
-    # because the two are routinely confused and adjacency makes a value in the
-    # wrong column obvious.
+    # serial came with migration 010. It's next to card_number because they're
+    # easy to mix up, and side by side it's obvious if one is in the wrong column.
     "player", "year", "set_name", "card_number", "serial", "card_type", "category",
     "position_type", "lane",
     "purchase_price", "shipping_in", "purchase_tax", "other_costs",
@@ -52,14 +50,14 @@ def test_header_uses_renamed_columns(auth, fake_db):
     assert resp.status_code == 200
     header = resp.text.splitlines()[0].split(",")
     assert header == _HEADER
-    # The 003 renames must never come back.
+    # The old column names from before migration 003 shouldn't come back.
     assert "sport" not in header and "variation" not in header
-    # And the bare gross column is gone for good.
+    # And the old profit column without fees is gone.
     assert "profit" not in header
 
 
 def test_net_profit_when_sold_with_no_fees_equals_gross(auth, fake_db):
-    """With zero fees, net == gross. This is the benign case that hid the bug."""
+    """With no fees the old and new math give the same answer. This is what hid the bug."""
     fake_db.select_rows = [{
         "id": "c1",
         "player": "Luka Doncic", "year": "2018", "set_name": "Prizm",
@@ -73,10 +71,10 @@ def test_net_profit_when_sold_with_no_fees_equals_gross(auth, fake_db):
 
 
 def test_fees_and_shipping_reduce_net_profit(auth, fake_db):
-    """🔴 THE REGRESSION GUARD.
+    """The main test for this file.
 
-    The export used to report `sale_price - purchase_price` and ignore every
-    cost. This is the test that fails if that ever comes back.
+    The export used to just do sale_price - purchase_price and ignore every
+    other cost. This fails if that ever comes back.
     """
     fake_db.select_rows = [{
         "id": "c1",
@@ -91,7 +89,7 @@ def test_fees_and_shipping_reduce_net_profit(auth, fake_db):
 
     assert row[_ALL_IN_IDX] == "112.00"       # 100 + 5 + 7
     assert row[_NET_PROFIT_IDX] == "99.87"    # (250 - 33.13 - 5) - 112
-    assert row[_NET_PROFIT_IDX] != "150.00"   # the old gross answer
+    assert row[_NET_PROFIT_IDX] != "150.00"   # what the old code would say
 
 
 def test_shipping_collected_counts_as_revenue(auth, fake_db):
@@ -106,7 +104,7 @@ def test_shipping_collected_counts_as_revenue(auth, fake_db):
 
 
 def test_profit_blank_when_unsold(auth, fake_db):
-    """Blank, not 0 — a spreadsheet averages 0 but skips blanks."""
+    """Blank, not 0. A spreadsheet averages in a 0 but skips blanks."""
     fake_db.select_rows = [{
         "id": "c1",
         "player": "Anthony Edwards", "purchase_price": 40, "sale_price": None,
@@ -119,8 +117,8 @@ def test_profit_blank_when_unsold(auth, fake_db):
 
 
 def test_unsold_card_with_a_sale_price_still_has_no_profit(auth, fake_db):
-    """The second bug in the old line: it emitted a profit for ANY card with
-    both prices, including one still sitting in hand."""
+    """The other old bug: it showed a profit for any card with both prices,
+    even one I still had."""
     fake_db.select_rows = [{
         "id": "c1", "player": "x", "category": "baseball",
         "status": "in_hand", "purchase_price": 40, "sale_price": 90,

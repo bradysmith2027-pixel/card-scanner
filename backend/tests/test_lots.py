@@ -1,7 +1,6 @@
-"""Endpoint tests for POST /lots.
+"""Tests for POST /lots.
 
-Reuses the multi-table fake from test_trades rather than keeping a second copy
-in sync — the lesson from profit being implemented in six places.
+Uses the same fake database as test_trades so there's only one copy of it.
 """
 
 from decimal import Decimal
@@ -67,7 +66,7 @@ def test_bulk_remainder_is_persisted_on_the_lot(auth, db):
     body = r.json()
     assert Decimal(body["bulk_basis"]) == Decimal("81.77")
     assert db.inserts["purchase_lots"][0]["bulk_basis"] == "81.77"
-    # The entered card carries only its share, not the whole lot.
+    # The card I entered only takes its share, not the whole lot.
     assert db.inserts["cards"][0]["purchase_price"] == "118.23"
 
 
@@ -82,7 +81,7 @@ def test_lot_shipping_reaches_the_cards(auth, db):
 
 
 def test_per_card_shipping_is_cleared_to_avoid_double_counting(auth, db):
-    """Lot-level costs are already inside the allocated basis."""
+    """The lot's shipping and tax are already in the split."""
     post({
         "purchase_date": "2026-09-14", "total_cost": "100.00",
         "shipping_in": "20.00",
@@ -94,7 +93,7 @@ def test_per_card_shipping_is_cleared_to_avoid_double_counting(auth, db):
 
 
 def test_client_supplied_purchase_price_is_overridden_by_allocation(auth, db):
-    """The allocator decides basis. A stray price in the payload must not win."""
+    """The split decides the cost. A price sent with the card should get ignored."""
     post({
         "purchase_date": "2026-09-14", "total_cost": "60.00",
         "cards": [lot_card(est_value="1", purchase_price="999.00")],
@@ -137,7 +136,7 @@ def test_negative_total_cost_is_rejected(auth, db):
 
 
 def test_bad_source_is_rejected_at_the_api_boundary(auth, db):
-    """Must 422 here, not reach Postgres and come back as an opaque 23514."""
+    """Should be a 422 here, not a confusing Postgres error."""
     r = post({
         "purchase_date": "2026-09-14", "total_cost": "10.00",
         "source": "craigslist",

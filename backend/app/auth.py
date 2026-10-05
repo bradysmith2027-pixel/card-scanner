@@ -1,24 +1,20 @@
 """
-auth.py — FastAPI dependency that verifies a Supabase JWT and identifies the
-caller.
+auth.py
 
-Every protected endpoint depends on `current_user`, which:
-  1. Pulls the Bearer token from the Authorization header.
-  2. Verifies its signature + expiry against Supabase's ES256 signing key.
-  3. Returns an AuthedUser (id + raw token) for downstream use.
+Checks the Supabase login token on every request and figures out who's calling.
 
-The raw token is passed on to supabase_client.user_client() so RLS runs as
-this user — auth here and RLS in the database are belt-and-suspenders.
+Every protected endpoint uses current_user, which:
+  1. Grabs the Bearer token from the Authorization header.
+  2. Checks the signature and expiration against Supabase's public key.
+  3. Returns the user id and token.
 
-SIGNING KEYS (2026-07-21):
-  This project uses asymmetric JWT signing keys — the CURRENT key is ECC
-  (P-256), so access tokens are signed with **ES256**. Supabase publishes the
-  matching public key(s) at:
-      {SUPABASE_URL}/auth/v1/.well-known/jwks.json
-  We verify against that JWKS (no shared secret). PyJWKClient fetches + caches
-  the keys and selects the right one via the token's `kid` header. The old
-  legacy HS256 shared secret is retired; since there are no pre-rotation users,
-  we don't need an HS256 fallback path.
+The token also gets passed to supabase_client.user_client() so the database
+runs queries as that user. So there's a check here and RLS in the database too.
+
+My Supabase project signs tokens with ES256 (not the old shared secret). The
+public keys are at:
+    {SUPABASE_URL}/auth/v1/.well-known/jwks.json
+PyJWKClient downloads and caches them and picks the right one for each token.
 """
 
 import logging
@@ -34,26 +30,26 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# auto_error=False so we can return a clean 401 instead of FastAPI's default.
+# auto_error=False so I can send back my own 401 instead of FastAPI's default.
 _bearer = HTTPBearer(auto_error=False)
 
-# Supabase access tokens carry the "authenticated" audience.
+# Supabase tokens use "authenticated" as the audience.
 _AUDIENCE = "authenticated"
 _ALGORITHMS = ["ES256"]
 
 
 @dataclass
 class AuthedUser:
-    id: str          # Supabase auth user id (the JWT "sub" claim)
-    token: str       # raw access token, forwarded to Supabase for RLS
-    readonly: bool = False   # True for granted viewers; blocks every write
+    id: str          # Supabase user id (the "sub" in the token)
+    token: str       # the token itself, sent to Supabase so RLS works
+    readonly: bool = False   # True for view-only accounts, blocks any changes
 
 
 @lru_cache
 def _jwks_client() -> PyJWKClient:
     """
-    Cached client for Supabase's JWKS endpoint. Built once; PyJWKClient caches
-    fetched signing keys internally so we're not hitting the network per request.
+    Client for Supabase's public keys. Only gets made once, and it caches the
+    keys so it doesn't download them on every request.
     """
     settings = get_settings()
     settings.require("supabase_url")
@@ -90,12 +86,10 @@ def current_user(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token."
         )
     except Exception:
-        # JWKS fetch/parse failures, missing SUPABASE_URL, malformed token
-        # headers, etc. The client gets a generic 401 (no internal detail
-        # leaked), but the real cause is logged server-side — otherwise this
-        # branch is undebuggable in production, which is exactly what happened
-        # on 2026-08-24 when an unset SUPABASE_URL surfaced only as
-        # "Could not verify token." Same lesson as the create_card fix (8/18).
+        # Anything else that goes wrong (can't get the keys, SUPABASE_URL not
+        # set, a broken token, etc). The user just gets a plain 401, but I log
+        # the real error so I can actually tell what broke. When SUPABASE_URL
+        # was missing on Railway, all I got was "Could not verify token."
         logger.exception("Token verification failed")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -109,16 +103,14 @@ def current_user(
             detail="Token missing subject.",
         )
 
-    # Access allowlist (env ALLOWED_EMAILS) — FAIL-CLOSED as of 2026-08-24.
+    # Email allowlist (ALLOWED_EMAILS).
     #
-    # A valid token is NOT sufficient. Supabase signup is public and Google SSO
-    # issues usable tokens with no email confirmation, so "authenticated" means
-    # "any stranger with a Google account." The allowlist is the real gate.
+    # Having a valid token isn't enough. Anyone with a Google account can sign
+    # up through Supabase, so the allowlist is what actually keeps people out.
     #
-    #   ALLOWED_EMAILS set      -> only those emails pass
-    #   unset + ALLOW_OPEN_ACCESS=true -> open, deliberately
-    #   unset + no opt-in       -> DENY EVERYONE (a forgotten env var must never
-    #                              silently open the API)
+    #   ALLOWED_EMAILS set               -> only those emails get in
+    #   not set + ALLOW_OPEN_ACCESS=true -> anyone can get in (on purpose)
+    #   not set at all                   -> nobody gets in
     settings = get_settings()
     if settings.allowed_emails:
         email = payload.get("email")
@@ -136,16 +128,14 @@ def current_user(
             ),
         )
 
-    # READ-ONLY VIEWERS (2026-09-17).
+    # Read-only accounts.
     #
-    # Enforced HERE, on the method, rather than as a per-route dependency, and
-    # that is deliberate: a per-route guard has to be remembered on every future
-    # mutating endpoint, and the one time it is forgotten the account silently
-    # stops being read-only. Checking the HTTP method in the one dependency that
-    # every protected route already uses cannot be forgotten.
+    # I check this here based on the request method instead of on each route.
+    # That way if I add a new endpoint later I can't forget to block viewers
+    # on it.
     #
-    # RLS (migration 011) is still the real boundary for the OWNER's data; this
-    # stops a viewer creating rows under their own user_id, which RLS permits.
+    # RLS (migration 011) is what protects my data. This just stops a viewer
+    # from adding cards of their own, which RLS would allow.
     email = (payload.get("email") or "").lower()
     readonly = bool(email) and email in settings.readonly_emails
     if readonly and request.method not in ("GET", "HEAD", "OPTIONS"):

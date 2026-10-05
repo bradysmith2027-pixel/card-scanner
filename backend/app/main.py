@@ -1,14 +1,16 @@
 """
-main.py — FastAPI app entry point.
+main.py
 
-Boot it (from the backend/ folder, venv active):
+Starts the FastAPI app.
+
+To run it (from backend/ with the venv on):
     uvicorn app.main:app --reload
 
-Then check it's alive:
+Then check it's working:
     http://127.0.0.1:8000/health      -> {"status": "ok"}
-    http://127.0.0.1:8000/docs        -> interactive API docs
+    http://127.0.0.1:8000/docs        -> API docs
 
-Routers (scan, cards, export) get mounted here as they're built.
+All the routers get added at the bottom.
 """
 
 import logging
@@ -25,9 +27,8 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
-# Interactive docs are OFF unless ENABLE_DOCS=true. Leaving /docs public on a
-# production service publishes the entire API surface (every route, schema, and
-# field name) to anyone who finds the URL.
+# Docs are off unless ENABLE_DOCS=true. If /docs was public in production,
+# anyone could see every route and field in the API.
 _docs = "/docs" if settings.enable_docs else None
 _redoc = "/redoc" if settings.enable_docs else None
 _openapi = "/openapi.json" if settings.enable_docs else None
@@ -40,7 +41,7 @@ app = FastAPI(
     openapi_url=_openapi,
 )
 
-# Make the access-control posture visible at boot instead of a silent surprise.
+# Log who's allowed in when the app starts so I can see it in the logs.
 if settings.allowed_emails:
     logger.info(
         "Access control: allowlist active (%d address(es)).",
@@ -58,13 +59,13 @@ else:
         "ALLOW_OPEN_ACCESS=true."
     )
 
-# Rate limiting (used by the scan endpoint). Register the limiter + the 429
-# handler so @limiter.limit(...) works and over-limit requests return 429.
+# Rate limiting for /scan. This sets up the limiter so @limiter.limit(...)
+# works and returns a 429 when someone goes over.
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# CORS locked to the configured frontend origin(s) — never "*", which would
-# be a data-leak combo with credentialed requests.
+# Only my frontend can call the API from a browser. Never use "*" here since
+# requests send login info.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
@@ -76,11 +77,11 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict:
-    """Liveness check — no auth, no DB. Confirms the app booted."""
+    """Quick check that the app is up. No login or database needed."""
     return {"status": "ok"}
 
 
-# --- Routers (mounted as they're built) ------------------------------------
+# --- Routers ----------------------------------------------------------------
 from app.routers import cards, export, lots, scan, trades  # noqa: E402
 
 app.include_router(cards.router)

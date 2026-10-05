@@ -1,42 +1,36 @@
 -- ============================================================
 -- 009_purchase_lots.sql
--- Dreamboat Slabs — one payment, many cards.
+-- Lots: one payment, a bunch of cards.
 --
--- WHY THIS EXISTS (2026-09-14):
---   Verified against the codebase on 2026-09-14: there is NO purchase_lots
---   table and NO lot_id column anywhere in the backend. The app cannot record
---   a bundle buy, so every card from a lot gets a hand-guessed cost basis.
+-- There was no purchase_lots table and no lot_id anywhere, so I couldn't log a
+-- lot. Every card from a lot just got a cost I guessed.
 --
---   That is the most expensive gap in the system, because of what Brady's own
---   sales history says:
+-- That's a big deal because lots are where I make the most:
 --
---     Cash sales >= $300 (single cards, bought near comp):
---        7 cards, $4,048 cost, $232 net  ->   5.7% ROI
---     Sub-$300 (Discord LOTS at ~$1.27/card):
---       28 cards, $1,294 cost, $504 net  ->  39% ROI
+--     Single cards over $300 (bought near comps):
+--        7 cards, $4,048 cost, $232 profit  ->   5.7% ROI
+--     Under $300 (Discord lots at ~$1.27 a card):
+--       28 cards, $1,294 cost, $504 profit  ->  39% ROI
 --
---   His best channel by a factor of seven is the one the system cannot record.
---   Deploying T1 into lots without this means the gates (>=60% sell-through,
---   >=20% net margin) get measured on invented numbers.
+-- My best channel by far was the one the app couldn't track.
 --
--- THE ALLOCATION RULE — pro-rata by estimated value, never an even split.
---   `app/lot_basis.py` is the single definition; `app/allocation.py` does the
---   penny-exact apportionment shared with trades.
+-- The cost gets split based on what each card is worth, never evenly. The math
+-- is in app/lot_basis.py, and app/allocation.py does the to-the-cent split
+-- that trades use too.
 --
---   Even-split is not a "simpler default" — it is actively destructive. Give a
---   $120 hit and a $0.50 common the same basis and the hit reports a ~2,900%
---   return while the commons look like disasters. Per-card ROI is then noise
---   forever, and ROI is exactly what the tranche gates read.
+-- An even split would wreck the numbers. If a $120 card and a $0.50 common got
+-- the same cost, the big card would show like a 2,900% return and the commons
+-- would look like huge losses.
 --
--- 🔴 THE BULK REMAINDER — the part that makes this usable in real life
---   Nobody enters 46 commons. Brady buys a 50-card lot, enters the 4 worth
---   entering, and the rest goes in a box. Spread the whole lot price across
---   only those 4 and each absorbs basis it never cost.
+-- The bulk remainder:
+--   I'm not entering 46 commons. I buy a 50 card lot, enter the 4 worth it, and
+--   box the rest. If the whole lot price went on those 4, they'd each carry way
+--   more cost than they should.
 --
---   `bulk_remainder_value` is the estimated value of the cards NOT entered.
---   It joins the denominator and absorbs its share, which is stored in
---   `bulk_basis`. Entered cards then carry only what they actually cost, and
---   the lot still balances to the penny:
+--   bulk_remainder_value is about what the cards I didn't enter are worth. It
+--   takes its share of the cost, which gets saved in bulk_basis. That way the
+--   cards I entered only carry what they really cost, and the lot still adds
+--   up to the cent:
 --
 --       SUM(cards.purchase_price WHERE lot_id = L) + L.bulk_basis
 --         = L.total_cost + L.shipping_in + L.purchase_tax + L.other_costs
@@ -48,8 +42,8 @@ CREATE TABLE IF NOT EXISTS purchase_lots (
   user_id         uuid NOT NULL DEFAULT auth.uid()
                     REFERENCES auth.users (id) ON DELETE CASCADE,
 
-  -- What the lot cost. Split the same way a card's cost is split, so there is
-  -- ONE idea of "all-in" in this system rather than two competing ones.
+  -- What the lot cost. Split up the same way as a single card's cost, so
+  -- "all-in" means the same thing everywhere.
   total_cost      numeric NOT NULL DEFAULT 0,
   shipping_in     numeric,
   purchase_tax    numeric,
@@ -60,9 +54,9 @@ CREATE TABLE IF NOT EXISTS purchase_lots (
   seller_name     text,
   card_count      integer,
 
-  -- Estimated value of cards NOT entered individually. See header.
+  -- About what the cards I didn't enter are worth. See the top of the file.
   bulk_remainder_value numeric NOT NULL DEFAULT 0,
-  -- The share of lot cost that landed on those un-entered cards.
+  -- The part of the lot's cost that went to those cards.
   bulk_basis           numeric NOT NULL DEFAULT 0,
 
   notes           text,
@@ -117,7 +111,7 @@ ALTER TABLE purchase_lots
 
 
 -- ============================================================
--- cards.lot_id — which lot a card came from
+-- cards.lot_id: which lot a card came from
 -- ============================================================
 
 ALTER TABLE cards
@@ -134,7 +128,7 @@ CREATE INDEX IF NOT EXISTS idx_purchase_lots_user_date
 
 
 -- ============================================================
--- RLS — same owner policy as every other table (migration 002)
+-- RLS: same owner policy as every other table (migration 002)
 -- ============================================================
 
 ALTER TABLE purchase_lots ENABLE ROW LEVEL SECURITY;
@@ -147,7 +141,7 @@ CREATE POLICY purchase_lots_owner ON purchase_lots
 
 
 -- ============================================================
--- updated_at trigger (matches cards, per migration 003)
+-- updated_at trigger (same as cards, from migration 003)
 -- ============================================================
 
 DROP TRIGGER IF EXISTS set_purchase_lots_updated_at ON purchase_lots;
@@ -157,10 +151,10 @@ CREATE TRIGGER set_purchase_lots_updated_at
 
 
 -- ============================================================
--- VERIFY (run after applying)
+-- Check it worked (run after applying)
 -- ============================================================
 --
---   -- Every lot must balance. This should return ZERO rows.
+--   -- Every lot should add up. This should return nothing.
 --   SELECT l.id,
 --          l.total_cost + COALESCE(l.shipping_in,0)
 --            + COALESCE(l.purchase_tax,0) + COALESCE(l.other_costs,0) AS all_in,

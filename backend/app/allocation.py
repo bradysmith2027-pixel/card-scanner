@@ -1,30 +1,22 @@
 """
-allocation.py — split one amount of money across many items, exactly.
+allocation.py
 
-WHY THIS EXISTS (2026-09-14)
-    Dreamboat has two places where a single payment must become many per-card
-    cost bases:
+Splits one amount of money across a bunch of cards so it adds back up exactly.
 
-        TRADES — basis given up (+ cash boot) carries onto the cards received
-        LOTS   — one lot price spreads across every card in the bundle
+I need this in two places:
+    Trades: the cost of what I gave up (plus any cash) moves onto the cards I got
+    Lots:   the price of the whole lot gets spread across every card in it
 
-    Both need the same two properties, and both get them wrong by default:
+Two rules:
 
-    1. PRO-RATA BY VALUE, NEVER AN EVEN SPLIT.
-       An even split hands a $120 hit the same basis as a $0.50 common. The
-       hit then looks like a 2,900% miracle and the commons look like
-       disasters, and per-card ROI data is destroyed permanently. Brady's
-       Discord lots are his 39%-ROI channel — the channel most worth measuring
-       is the one an even split would lie about hardest.
+    1. Split by value, not evenly. If a $120 card and a $0.50 common each got
+       half the cost, the big card would look like an amazing flip and the
+       commons would look like huge losses. The ROI numbers would be useless.
 
-    2. THE PARTS MUST SUM TO THE WHOLE, TO THE PENNY.
-       Naive rounding splits $100.00 three ways into $33.33 x3 = $99.99 and
-       loses a cent on every bundle. Lost cents mean the books stop balancing
-       in a way nobody can reconstruct six months later.
+    2. The pieces have to add up to the total, to the cent. Normal rounding
+       splits $100 three ways into $33.33 x3 = $99.99 and loses a penny.
 
-    Rather than keep two copies of that logic in sync — which is exactly how
-    profit ended up computed four different ways and all of them wrong — it
-    lives here once. Same principle as profit.py and trade_basis.py.
+Trades and lots both use this so there's only one copy of the logic.
 """
 
 from __future__ import annotations
@@ -38,15 +30,14 @@ CENTS = Decimal("0.01")
 def largest_remainder(
     total: Decimal, weights: Sequence[Decimal], refs: Sequence[str]
 ) -> dict[str, Decimal]:
-    """Apportion `total` by `weights` so the parts sum EXACTLY to `total`.
+    """Split total by weights so the pieces add up to exactly total.
 
-    Floors every share to cents, then distributes the leftover pennies one at
-    a time to the largest fractional remainders. Ties break by original order,
-    so the result is deterministic and reproducible across runs — a report
-    that reshuffles pennies between runs is a report nobody can audit.
+    Rounds every share down to the cent, then hands out the leftover pennies
+    one at a time to whoever got rounded down the most. Ties go in the original
+    order, so it gives the same answer every time.
 
-    Assumes `weights` sums to more than zero; callers substitute equal weights
-    (and say so) when they have no values to go on.
+    weights has to add up to more than 0. If there are no values to go on, the
+    caller just passes equal weights.
     """
     weight_total = sum(weights, Decimal(0))
     exact = [total * w / weight_total for w in weights]
