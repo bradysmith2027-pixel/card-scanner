@@ -82,10 +82,13 @@ def health() -> dict:
 
 
 # --- Routers ----------------------------------------------------------------
-from app.routers import cards, export, lots, scan, trades  # noqa: E402
+from app.routers import cards, demo, export, lots, scan, trades  # noqa: E402
 
 app.include_router(cards.router)
 app.include_router(scan.router)
 app.include_router(export.router)
 app.include_router(trades.router)
 app.include_router(lots.router)
+# The only router with no login. It reads demo_cards, which is a scaled
+# snapshot, never the real cards table. See demo.py.
+app.include_router(demo.router)
